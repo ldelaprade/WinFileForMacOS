@@ -456,6 +456,8 @@ class ExplorerWindow(QMainWindow):
         QShortcut(QKeySequence.StandardKey.Cut, self, activated=self.cut_selected)
         QShortcut(QKeySequence.StandardKey.Paste, self, activated=self.paste_into_current)
 
+        QShortcut(QKeySequence("Ctrl+T"), self, activated=self.open_terminal)
+
         QShortcut(QKeySequence("Alt+D"), self, activated=self.focus_address_bar)
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self.focus_address_bar)
 
@@ -532,6 +534,7 @@ class ExplorerWindow(QMainWindow):
         menu.addAction("Delete", self.delete_selected)
         menu.addSeparator()
         menu.addAction("New Folder", self.new_folder)
+        menu.addAction("Open Terminal", self.open_terminal)
         menu.addAction("Refresh", self.refresh)
         menu.exec(self.list_view.viewport().mapToGlobal(pos))
 
@@ -741,6 +744,13 @@ class ExplorerWindow(QMainWindow):
             self.refresh()
         except OSError as error:
             QMessageBox.critical(self, "New Folder failed", str(error))
+
+    def open_terminal(self) -> None:
+        current_path = self.current_path()
+        try:
+            os.system(f'open -a Terminal.app "{current_path}"')
+        except OSError as error:
+            QMessageBox.critical(self, "Open Terminal failed", str(error))
 
     def refresh(self) -> None:
         current = self.current_path()
