@@ -1,3 +1,6 @@
+# WinFileForMacOS
+## Windows Style Alternative For MacOS Finder
+
 # WinFile XP (Starter)
 
 A minimal Windows XP-style file explorer starter for macOS using Python and PySide6.

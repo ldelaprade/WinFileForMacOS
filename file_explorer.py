@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QFileInfo, QModelIndex, QPoint, QSize, Qt, QUrl
+from PySide6.QtCore import QDir, QFileInfo, QModelIndex, QPoint, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -316,6 +318,31 @@ class ConfirmingDropTreeView(QTreeView):
 
 
 class ExplorerWindow(QMainWindow):
+    _PREVIEWABLE_IMAGE_EXTENSIONS = {
+        ".bmp",
+        ".gif",
+        ".heic",
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".webp",
+    }
+    _PREVIEWABLE_DOCUMENT_EXTENSIONS = {
+        ".pdf",
+    }
+    _PREVIEWABLE_VIDEO_EXTENSIONS = {
+        ".avi",
+        ".m4v",
+        ".mkv",
+        ".mov",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".webm",
+    }
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("WinFile XP for Mac OS")
@@ -326,6 +353,7 @@ class ExplorerWindow(QMainWindow):
         self._clipboard_paths: list[str] = []
         self._clipboard_mode: str | None = None
         self._view_mode: str = "list"  # "list" or "thumbnail"
+        self._thumbnail_icon_cache: dict[tuple[str, int, int, int, int], QIcon] = {}
 
         self._setup_models()
         self._setup_views()
@@ -352,10 +380,10 @@ class ExplorerWindow(QMainWindow):
         self.dir_model.setRootPath("")
 
     def _setup_views(self) -> None:
-        splitter = QSplitter(self)
-        self.setCentralWidget(splitter)
+        self.splitter = QSplitter(self)
+        self.setCentralWidget(self.splitter)
 
-        self.tree_view = ConfirmingDropTreeView(splitter)
+        self.tree_view = ConfirmingDropTreeView(self.splitter)
         self.tree_view.setModel(self.dir_model)
         self.tree_view.setHeaderHidden(True)
         self.tree_view.setColumnHidden(1, True)
@@ -368,7 +396,7 @@ class ExplorerWindow(QMainWindow):
         self.tree_view.set_move_confirm_callback(self._confirm_drag_move)
         self.tree_view.clicked.connect(self._on_tree_clicked)
 
-        self.list_view = ConfirmingDropTreeView(splitter)
+        self.list_view = ConfirmingDropTreeView(self.splitter)
         self.list_view.setModel(self.fs_model)
         self.list_view.setRootIsDecorated(False)
         self.list_view.setAlternatingRowColors(True)
@@ -390,11 +418,11 @@ class ExplorerWindow(QMainWindow):
             lambda *_: self._update_status()
         )
 
-        self.thumbnail_view = QListWidget(splitter)
+        self.thumbnail_view = QListWidget(self.splitter)
         self.thumbnail_view.setViewMode(QListWidget.IconMode)
         self.thumbnail_view.setResizeMode(QListWidget.Adjust)
-        self.thumbnail_view.setIconSize(QPixmap(96, 96).size())
-        self.thumbnail_view.setGridSize(QSize(120, 120))
+        self.thumbnail_view.setIconSize(QSize(192, 192))
+        self.thumbnail_view.setGridSize(QSize(236, 256))
         self.thumbnail_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.thumbnail_view.setDragEnabled(True)
         self.thumbnail_view.setAcceptDrops(True)
@@ -408,7 +436,10 @@ class ExplorerWindow(QMainWindow):
         )
         self.thumbnail_view.hide()
 
-        splitter.setSizes([300, 900])
+        self.splitter.setSizes([300, 900, 0])
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 1)
 
     def _setup_toolbar(self) -> None:
         toolbar = QToolBar("Navigation", self)
@@ -856,29 +887,136 @@ class ExplorerWindow(QMainWindow):
 
                 item = QListWidgetItem()
                 item.setText(entry)
-
-                if os.path.isdir(entry_path):
-                    item.setIcon(self.fs_model.iconProvider().icon(QFileIconProvider.Folder))
-                else:
-                    item.setIcon(self.fs_model.iconProvider().icon(QFileIconProvider.File))
+                item.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                item.setIcon(self._thumbnail_icon_for_path(entry_path))
 
                 item.setData(Qt.UserRole, entry_path)
                 self.thumbnail_view.addItem(item)
         except OSError:
             pass
 
+    def _thumbnail_icon_for_path(self, path: str) -> QIcon:
+        if os.path.isdir(path):
+            return self.fs_model.iconProvider().icon(QFileIconProvider.Folder)
+
+        icon_size = self.thumbnail_view.iconSize()
+        cache_key = self._thumbnail_cache_key(path, icon_size)
+        if cache_key is not None:
+            cached_icon = self._thumbnail_icon_cache.get(cache_key)
+            if cached_icon is not None:
+                return cached_icon
+
+        suffix = Path(path).suffix.lower()
+        preview = QPixmap()
+        if suffix in self._PREVIEWABLE_IMAGE_EXTENSIONS:
+            preview = QPixmap(path)
+        elif (
+            suffix in self._PREVIEWABLE_DOCUMENT_EXTENSIONS
+            or suffix in self._PREVIEWABLE_VIDEO_EXTENSIONS
+        ):
+            preview = self._quicklook_preview_pixmap(path, icon_size)
+
+        if not preview.isNull():
+            icon = self._icon_from_preview_pixmap(preview, icon_size)
+        else:
+            icon = self.fs_model.iconProvider().icon(QFileIconProvider.File)
+
+        if cache_key is not None:
+            if len(self._thumbnail_icon_cache) > 500:
+                self._thumbnail_icon_cache.clear()
+            self._thumbnail_icon_cache[cache_key] = icon
+
+        return icon
+
+    def _thumbnail_cache_key(self, path: str, icon_size: QSize) -> tuple[str, int, int, int, int] | None:
+        try:
+            stat = os.stat(path)
+            return (
+                path,
+                stat.st_mtime_ns,
+                stat.st_size,
+                icon_size.width(),
+                icon_size.height(),
+            )
+        except OSError:
+            return None
+
+    @staticmethod
+    def _icon_from_preview_pixmap(preview: QPixmap, icon_size: QSize) -> QIcon:
+        scaled = preview.scaled(
+            icon_size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        canvas = QPixmap(icon_size)
+        canvas.fill(Qt.transparent)
+
+        painter = QPainter(canvas)
+        x = (icon_size.width() - scaled.width()) // 2
+        y = (icon_size.height() - scaled.height()) // 2
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
+        return QIcon(canvas)
+
+    @staticmethod
+    def _quicklook_preview_pixmap(path: str, icon_size: QSize) -> QPixmap:
+        preview_size = str(max(icon_size.width(), icon_size.height(), 256))
+        try:
+            with tempfile.TemporaryDirectory(prefix="winfile-preview-") as temp_dir:
+                subprocess.run(
+                    ["qlmanage", "-t", "-s", preview_size, "-o", temp_dir, path],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+                preview_files = sorted(
+                    Path(temp_dir).glob("*.png"),
+                    key=lambda candidate: candidate.stat().st_mtime_ns,
+                    reverse=True,
+                )
+
+                for preview_file in preview_files:
+                    pixmap = QPixmap(str(preview_file))
+                    if not pixmap.isNull():
+                        return pixmap
+        except OSError:
+            pass
+
+        return QPixmap()
+
     def toggle_view_mode(self) -> None:
         if self._view_mode == "list":
             self._view_mode = "thumbnail"
             self.list_view.hide()
             self.thumbnail_view.show()
+            self._ensure_thumbnail_width()
             self.view_toggle_action.setChecked(True)
         else:
             self._view_mode = "list"
             self.thumbnail_view.hide()
             self.list_view.show()
+            self._ensure_list_width()
             self.view_toggle_action.setChecked(False)
         self._update_status()
+
+    def _ensure_thumbnail_width(self) -> None:
+        def apply_sizes() -> None:
+            total = max(1, self.splitter.width())
+            tree = max(220, int(total * 0.25))
+            content = max(300, total - tree)
+            self.splitter.setSizes([tree, 0, content])
+
+        QTimer.singleShot(0, apply_sizes)
+
+    def _ensure_list_width(self) -> None:
+        def apply_sizes() -> None:
+            total = max(1, self.splitter.width())
+            tree = max(220, int(total * 0.25))
+            content = max(300, total - tree)
+            self.splitter.setSizes([tree, content, 0])
+
+        QTimer.singleShot(0, apply_sizes)
 
 
 def run() -> None:
