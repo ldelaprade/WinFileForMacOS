@@ -4,7 +4,7 @@ import os
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QFileInfo, QModelIndex, QPoint, Qt, QUrl
+from PySide6.QtCore import QDir, QFileInfo, QModelIndex, QPoint, QSize, Qt, QUrl
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -323,6 +325,7 @@ class ExplorerWindow(QMainWindow):
         self._history_pos = -1
         self._clipboard_paths: list[str] = []
         self._clipboard_mode: str | None = None
+        self._view_mode: str = "list"  # "list" or "thumbnail"
 
         self._setup_models()
         self._setup_views()
@@ -387,6 +390,24 @@ class ExplorerWindow(QMainWindow):
             lambda *_: self._update_status()
         )
 
+        self.thumbnail_view = QListWidget(splitter)
+        self.thumbnail_view.setViewMode(QListWidget.IconMode)
+        self.thumbnail_view.setResizeMode(QListWidget.Adjust)
+        self.thumbnail_view.setIconSize(QPixmap(96, 96).size())
+        self.thumbnail_view.setGridSize(QSize(120, 120))
+        self.thumbnail_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.thumbnail_view.setDragEnabled(True)
+        self.thumbnail_view.setAcceptDrops(True)
+        self.thumbnail_view.setDropIndicatorShown(True)
+        self.thumbnail_view.setDragDropMode(QListWidget.DragDrop)
+        self.thumbnail_view.doubleClicked.connect(self._on_thumbnail_double_clicked)
+        self.thumbnail_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.thumbnail_view.customContextMenuRequested.connect(self._show_context_menu)
+        self.thumbnail_view.selectionModel().selectionChanged.connect(
+            lambda *_: self._update_status()
+        )
+        self.thumbnail_view.hide()
+
         splitter.setSizes([300, 900])
 
     def _setup_toolbar(self) -> None:
@@ -420,6 +441,13 @@ class ExplorerWindow(QMainWindow):
         self.refresh_action = QAction("Refresh", self)
         self.refresh_action.triggered.connect(self.refresh)
         toolbar.addAction(self.refresh_action)
+
+        toolbar.addSeparator()
+
+        self.view_toggle_action = QAction("Thumbnails", self)
+        self.view_toggle_action.setCheckable(True)
+        self.view_toggle_action.triggered.connect(self.toggle_view_mode)
+        toolbar.addAction(self.view_toggle_action)
 
     def _setup_statusbar(self) -> None:
         self.status = QStatusBar(self)
@@ -471,6 +499,15 @@ class ExplorerWindow(QMainWindow):
         if not index.isValid():
             return
         path = self.fs_model.filePath(index)
+        if os.path.isdir(path):
+            self.navigate_to(path, record_history=True)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _on_thumbnail_double_clicked(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.UserRole)
+        if not path:
+            return
         if os.path.isdir(path):
             self.navigate_to(path, record_history=True)
             return
@@ -557,6 +594,8 @@ class ExplorerWindow(QMainWindow):
         self.list_view.setRootIndex(root_index)
         self.address_bar.setText(normalized)
 
+        self._populate_thumbnail_view(normalized)
+
         if record_history:
             if self._history_pos < len(self._history) - 1:
                 self._history = self._history[: self._history_pos + 1]
@@ -597,10 +636,15 @@ class ExplorerWindow(QMainWindow):
         self.forward_action.setEnabled(self._history_pos < len(self._history) - 1)
 
     def selected_indexes(self) -> list[QModelIndex]:
+        if self._view_mode == "thumbnail":
+            return []
         selection = self.list_view.selectionModel().selectedRows()
         return [index for index in selection if index.isValid()]
 
     def selected_paths(self) -> list[str]:
+        if self._view_mode == "thumbnail":
+            selected_items = self.thumbnail_view.selectedItems()
+            return [item.data(Qt.UserRole) for item in selected_items if item.data(Qt.UserRole)]
         return [self.fs_model.filePath(index) for index in self.selected_indexes()]
 
     def open_selected(self) -> None:
@@ -761,15 +805,19 @@ class ExplorerWindow(QMainWindow):
         self.list_view.setRootIndex(index)
         self.tree_view.setCurrentIndex(tree_index)
         self.tree_view.scrollTo(tree_index)
+        self._populate_thumbnail_view(current)
         self._update_status()
 
     def _update_status(self) -> None:
-        root_index = self.list_view.rootIndex()
-        if not root_index.isValid():
-            self.status.showMessage("Ready")
-            return
+        if self._view_mode == "thumbnail":
+            item_count = self.thumbnail_view.count()
+        else:
+            root_index = self.list_view.rootIndex()
+            if not root_index.isValid():
+                self.status.showMessage("Ready")
+                return
+            item_count = self.fs_model.rowCount(root_index)
 
-        row_count = self.fs_model.rowCount(root_index)
         selected_paths = self.selected_paths()
 
         selected_size = 0
@@ -784,7 +832,7 @@ class ExplorerWindow(QMainWindow):
         if selected_size:
             selected_info += f" ({self._format_size(selected_size)})"
 
-        self.status.showMessage(f"Items: {row_count} | {selected_info}")
+        self.status.showMessage(f"Items: {item_count} | {selected_info}")
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
@@ -797,6 +845,40 @@ class ExplorerWindow(QMainWindow):
                 return f"{size:.1f} {unit}"
             size /= 1024.0
         return f"{size_bytes} B"
+
+    def _populate_thumbnail_view(self, path: str) -> None:
+        self.thumbnail_view.clear()
+        try:
+            for entry in os.listdir(path):
+                entry_path = os.path.join(path, entry)
+                if entry.startswith('.'):
+                    continue
+
+                item = QListWidgetItem()
+                item.setText(entry)
+
+                if os.path.isdir(entry_path):
+                    item.setIcon(self.fs_model.iconProvider().icon(QFileIconProvider.Folder))
+                else:
+                    item.setIcon(self.fs_model.iconProvider().icon(QFileIconProvider.File))
+
+                item.setData(Qt.UserRole, entry_path)
+                self.thumbnail_view.addItem(item)
+        except OSError:
+            pass
+
+    def toggle_view_mode(self) -> None:
+        if self._view_mode == "list":
+            self._view_mode = "thumbnail"
+            self.list_view.hide()
+            self.thumbnail_view.show()
+            self.view_toggle_action.setChecked(True)
+        else:
+            self._view_mode = "list"
+            self.thumbnail_view.hide()
+            self.list_view.show()
+            self.view_toggle_action.setChecked(False)
+        self._update_status()
 
 
 def run() -> None:
