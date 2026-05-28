@@ -1,5 +1,5 @@
 # ── Configuration ────────────────────────────────────────────────────────────
-APP_NAME      := eXPlorer
+APP_NAME      := WinFileXP
 APP_BUNDLE    := dist/$(APP_NAME).app
 DMG_NAME      := dist/$(APP_NAME).dmg
 ENTRY         := main.py
