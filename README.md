@@ -25,7 +25,7 @@ A minimal Windows XP-style file explorer starter for macOS using Python and PySi
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python main.py
+python -m src.main
 ```
 
 ## Notes

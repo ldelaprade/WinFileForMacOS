@@ -1,8 +1,11 @@
+# Run in package mode
+run:
+	python -m src.main
 # ── Configuration ────────────────────────────────────────────────────────────
 APP_NAME      := WinFileXP
 APP_BUNDLE    := dist/$(APP_NAME).app
 DMG_NAME      := dist/$(APP_NAME).dmg
-ENTRY         := main.py
+ENTRY         := src/main.py
 
 # Code-signing: fill in before running `make release`
 DEV_ID        ?= Developer ID Application: Your Name (TEAMID)

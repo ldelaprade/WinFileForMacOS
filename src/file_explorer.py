@@ -1,34 +1,22 @@
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QFileInfo, QModelIndex, QPoint, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QDir, QModelIndex, QPoint, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
-    QColor,
     QDesktopServices,
-    QDropEvent,
-    QIcon,
-    QKeyEvent,
     QKeySequence,
-    QPainter,
-    QPen,
-    QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QDialog,
-    QDialogButtonBox,
     QFileIconProvider,
     QFileSystemModel,
     QInputDialog,
-    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -39,321 +27,32 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QToolBar,
     QTreeView,
-    QVBoxLayout,
 )
 
-
-class XPIconProvider(QFileIconProvider):
-    def __init__(self) -> None:
-        super().__init__()
-        self._folder_icon = self._build_folder_icon()
-        self._file_icon = self._build_file_icon()
-
-    def icon(self, info_or_type):  # type: ignore[override]
-        if isinstance(info_or_type, QFileInfo):
-            if info_or_type.isDir():
-                return self._folder_icon
-            return self._file_icon
-
-        if info_or_type == QFileIconProvider.Folder:
-            return self._folder_icon
-        if info_or_type == QFileIconProvider.File:
-            return self._file_icon
-        return super().icon(info_or_type)
-
-    @staticmethod
-    def _build_folder_icon() -> QIcon:
-        pixmap = QPixmap(18, 16)
-        pixmap.fill(Qt.transparent)
-
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing, False)
-        painter.setPen(QPen(QColor("#9a7b2f"), 1))
-        painter.setBrush(QColor("#f6d66f"))
-        painter.drawRect(1, 5, 16, 10)
-        painter.setBrush(QColor("#f9e08e"))
-        painter.drawRect(2, 2, 7, 4)
-        painter.end()
-
-        return QIcon(pixmap)
-
-    @staticmethod
-    def _build_file_icon() -> QIcon:
-        pixmap = QPixmap(14, 16)
-        pixmap.fill(Qt.transparent)
-
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing, False)
-        painter.setPen(QPen(QColor("#7b7b7b"), 1))
-        painter.setBrush(QColor("#fffef8"))
-        painter.drawRect(1, 1, 11, 14)
-        painter.setPen(QPen(QColor("#d8d8d8"), 1))
-        painter.drawLine(3, 5, 10, 5)
-        painter.drawLine(3, 8, 10, 8)
-        painter.drawLine(3, 11, 10, 11)
-        painter.end()
-
-        return QIcon(pixmap)
-
-
-def _xp_stylesheet() -> str:
-    return """
-QMainWindow {
-    background-color: #f6f0dc;
-}
-
-QToolBar {
-    background: #efe7cb;
-    border: 1px solid #8a867a;
-    spacing: 4px;
-    padding: 3px;
-}
-
-QToolBar::separator {
-    width: 1px;
-    background: #8a867a;
-    margin: 2px 4px;
-}
-
-QStatusBar {
-    background: #efe7cb;
-    border-top: 1px solid #8a867a;
-    color: #1f1f1f;
-}
-
-QTreeView {
-    background: #fffdf3;
-    border: 1px solid #b8ad8a;
-    alternate-background-color: #fbf7e8;
-    color: #000000;
-    selection-background-color: #316ac5;
-    selection-color: #ffffff;
-    gridline-color: #d6d6d6;
-}
-
-QHeaderView::section {
-    background: #d4d0c8;
-    border: 1px solid #9b9b9b;
-    padding: 3px 6px;
-    color: #000000;
-    font-weight: bold;
-}
-
-QLineEdit {
-    background: #fffdf3;
-    border: 1px solid #b8ad8a;
-    padding: 3px 4px;
-    color: #000000;
-}
-
-QMenu {
-    background-color: #ffffff;
-    border: 1px solid #8a867a;
-}
-
-QMenu::item {
-    padding: 4px 20px;
-    background: transparent;
-}
-
-QMenu::item:selected {
-    background: #316ac5;
-    color: #ffffff;
-}
-
-QDialog {
-    background: #efe7cb;
-}
-
-QPushButton {
-    min-width: 74px;
-    padding: 3px 12px;
-    background: #d4d0c8;
-    border: 1px solid #7f7f7f;
-}
-
-QPushButton:focus {
-    border: 1px solid #0a246a;
-}
-
-QPushButton:pressed {
-    background: #c5c1b9;
-}
-"""
-
-
-class DeleteConfirmDialog(QDialog):
-    def __init__(self, message: str, parent: QMainWindow | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Delete")
-        self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
-        self.setModal(True)
-
-        layout = QVBoxLayout(self)
-        text_label = QLabel(message, self)
-        text_label.setWordWrap(True)
-        layout.addWidget(text_label)
-
-        self.button_box = QDialogButtonBox(self)
-        self.yes_button = self.button_box.addButton("Yes", QDialogButtonBox.AcceptRole)
-        self.no_button = self.button_box.addButton("No", QDialogButtonBox.RejectRole)
-
-        self.no_button.setDefault(True)
-        self.no_button.setAutoDefault(True)
-        self.no_button.setFocus()
-        self.yes_button.setAutoDefault(True)
-
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        layout.addWidget(self.button_box)
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            focused = self.focusWidget()
-            if focused is self.yes_button:
-                self.accept()
-                return
-            if focused is self.no_button:
-                self.reject()
-                return
-        super().keyPressEvent(event)
-
-
-class ActionConfirmDialog(QDialog):
-    def __init__(
-        self,
-        title: str,
-        message: str,
-        yes_label: str = "Yes",
-        no_label: str = "No",
-        parent: QMainWindow | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
-        self.setModal(True)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(message, self))
-
-        self.button_box = QDialogButtonBox(self)
-        self.yes_button = self.button_box.addButton(yes_label, QDialogButtonBox.AcceptRole)
-        self.no_button = self.button_box.addButton(no_label, QDialogButtonBox.RejectRole)
-
-        self.no_button.setDefault(True)
-        self.no_button.setAutoDefault(True)
-        self.no_button.setFocus()
-        self.yes_button.setAutoDefault(True)
-
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        layout.addWidget(self.button_box)
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            focused = self.focusWidget()
-            if focused is self.yes_button:
-                self.accept()
-                return
-            if focused is self.no_button:
-                self.reject()
-                return
-        super().keyPressEvent(event)
-
-
-class ConfirmingDropTreeView(QTreeView):
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._confirm_move_callback = None
-
-    def set_move_confirm_callback(self, callback) -> None:
-        self._confirm_move_callback = callback
-
-    def dropEvent(self, event: QDropEvent) -> None:
-        is_move_drop = event.proposedAction() == Qt.MoveAction or event.dropAction() == Qt.MoveAction
-        destination_path = self._resolve_drop_destination_path(event)
-        source_paths = self._resolve_drag_source_paths(event)
-        if (
-            is_move_drop
-            and event.source() is not None
-            and self._confirm_move_callback is not None
-            and not self._confirm_move_callback(destination_path, source_paths)
-        ):
-            event.ignore()
-            return
-        super().dropEvent(event)
-
-    def _resolve_drop_destination_path(self, event: QDropEvent) -> str:
-        if hasattr(event, "position"):
-            drop_pos = event.position().toPoint()
-        else:
-            drop_pos = event.pos()
-
-        target_index = self.indexAt(drop_pos)
-        if not target_index.isValid():
-            target_index = self.rootIndex()
-
-        model = self.model()
-        if isinstance(model, QFileSystemModel) and target_index.isValid():
-            target_path = model.filePath(target_index)
-            if target_path and os.path.isfile(target_path):
-                return os.path.dirname(target_path)
-            return target_path
-        return ""
-
-    def _resolve_drag_source_paths(self, event: QDropEvent) -> list[str]:
-        urls = event.mimeData().urls()
-        local_paths = [url.toLocalFile() for url in urls if url.isLocalFile()]
-        if local_paths:
-            return local_paths
-
-        source_view = event.source()
-        if isinstance(source_view, QTreeView):
-            selection_model = source_view.selectionModel()
-            model = source_view.model()
-            if selection_model is not None and isinstance(model, QFileSystemModel):
-                selected_rows = selection_model.selectedRows()
-                return [model.filePath(index) for index in selected_rows if index.isValid()]
-        return []
+from .dialogs import (
+    ActionConfirmDialog,
+    DeleteConfirmDialog,
+    build_delete_confirmation_message,
+    build_move_confirmation_message,
+)
+from .dragdrop_views import ConfirmingDropTreeView
+from .file_operations import create_folder, delete_items, paste_items, rename_item
+from .navigation_state import NavigationHistory
+from .thumbnail_previews import ThumbnailPreviewProvider
+from .ui_theme import XPIconProvider, xp_stylesheet
 
 
 class ExplorerWindow(QMainWindow):
-    _PREVIEWABLE_IMAGE_EXTENSIONS = {
-        ".bmp",
-        ".gif",
-        ".heic",
-        ".jpeg",
-        ".jpg",
-        ".png",
-        ".tif",
-        ".tiff",
-        ".webp",
-    }
-    _PREVIEWABLE_DOCUMENT_EXTENSIONS = {
-        ".pdf",
-    }
-    _PREVIEWABLE_VIDEO_EXTENSIONS = {
-        ".avi",
-        ".m4v",
-        ".mkv",
-        ".mov",
-        ".mp4",
-        ".mpeg",
-        ".mpg",
-        ".webm",
-    }
-
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("WinFile XP for Mac OS")
         self.resize(1200, 760)
 
-        self._history: list[str] = []
-        self._history_pos = -1
+        self.navigation_history = NavigationHistory()
         self._clipboard_paths: list[str] = []
         self._clipboard_mode: str | None = None
         self._view_mode: str = "list"  # "list" or "thumbnail"
-        self._thumbnail_icon_cache: dict[tuple[str, int, int, int, int], QIcon] = {}
+        self.thumbnail_provider: ThumbnailPreviewProvider | None = None
 
         self._setup_models()
         self._setup_views()
@@ -365,6 +64,7 @@ class ExplorerWindow(QMainWindow):
 
     def _setup_models(self) -> None:
         icon_provider = XPIconProvider()
+        self.thumbnail_provider = ThumbnailPreviewProvider(icon_provider)
 
         self.fs_model = QFileSystemModel(self)
         self.fs_model.setReadOnly(False)
@@ -545,7 +245,7 @@ class ExplorerWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _confirm_drag_move(self, destination_path: str, source_paths: list[str]) -> bool:
-        message = self._build_move_confirmation_message(destination_path, source_paths)
+        message = build_move_confirmation_message(destination_path, source_paths)
         dialog = ActionConfirmDialog(
             title="Move",
             message=message,
@@ -554,46 +254,6 @@ class ExplorerWindow(QMainWindow):
             parent=self,
         )
         return dialog.exec() == QDialog.Accepted
-
-    @staticmethod
-    def _selection_preview(paths: list[str], max_items: int = 3) -> str:
-        names = [Path(path).name or path for path in paths]
-        if not names:
-            return "(no items)"
-
-        if len(names) <= max_items:
-            return "\n".join(f"- {name}" for name in names)
-
-        shown = "\n".join(f"- {name}" for name in names[:max_items])
-        remaining = len(names) - max_items
-        return f"{shown}\n- ... and {remaining} more"
-
-    def _build_move_confirmation_message(self, destination_path: str, source_paths: list[str]) -> str:
-        item_count = len(source_paths)
-        if item_count == 0:
-            return "Move selected item(s) to this folder?"
-
-        destination_name = Path(destination_path).name if destination_path else "target folder"
-        preview = self._selection_preview(source_paths)
-        if item_count == 1:
-            return (
-                "Move this item?\n\n"
-                f"{preview}\n\n"
-                f"Destination: {destination_name}"
-            )
-
-        return (
-            f"Move {item_count} items?\n\n"
-            f"{preview}\n\n"
-            f"Destination: {destination_name}"
-        )
-
-    def _build_delete_confirmation_message(self, paths: list[str]) -> str:
-        item_count = len(paths)
-        preview = self._selection_preview(paths)
-        if item_count == 1:
-            return f"Delete this item permanently?\n\n{preview}"
-        return f"Delete {item_count} items permanently?\n\n{preview}"
 
     def _show_context_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)
@@ -628,11 +288,7 @@ class ExplorerWindow(QMainWindow):
         self._populate_thumbnail_view(normalized)
 
         if record_history:
-            if self._history_pos < len(self._history) - 1:
-                self._history = self._history[: self._history_pos + 1]
-            if not self._history or self._history[-1] != normalized:
-                self._history.append(normalized)
-                self._history_pos = len(self._history) - 1
+            self.navigation_history.record(normalized)
         self._update_nav_actions()
         self._update_status()
 
@@ -644,16 +300,16 @@ class ExplorerWindow(QMainWindow):
         self.address_bar.selectAll()
 
     def go_back(self) -> None:
-        if self._history_pos <= 0:
+        target = self.navigation_history.go_back()
+        if target is None:
             return
-        self._history_pos -= 1
-        self.navigate_to(self._history[self._history_pos], record_history=False)
+        self.navigate_to(target, record_history=False)
 
     def go_forward(self) -> None:
-        if self._history_pos >= len(self._history) - 1:
+        target = self.navigation_history.go_forward()
+        if target is None:
             return
-        self._history_pos += 1
-        self.navigate_to(self._history[self._history_pos], record_history=False)
+        self.navigate_to(target, record_history=False)
 
     def go_up(self) -> None:
         current = Path(self.current_path())
@@ -663,8 +319,8 @@ class ExplorerWindow(QMainWindow):
         self.navigate_to(str(parent), record_history=True)
 
     def _update_nav_actions(self) -> None:
-        self.back_action.setEnabled(self._history_pos > 0)
-        self.forward_action.setEnabled(self._history_pos < len(self._history) - 1)
+        self.back_action.setEnabled(self.navigation_history.can_go_back())
+        self.forward_action.setEnabled(self.navigation_history.can_go_forward())
 
     def selected_indexes(self) -> list[QModelIndex]:
         if self._view_mode == "thumbnail":
@@ -712,57 +368,23 @@ class ExplorerWindow(QMainWindow):
         if not destination_dir.is_dir():
             return
 
-        failures: list[str] = []
-        moved_count = 0
-        copied_count = 0
-
-        for source_path_str in list(self._clipboard_paths):
-            source_path = Path(source_path_str)
-            if not source_path.exists():
-                failures.append(f"{source_path}: not found")
-                continue
-
-            target_path = destination_dir / source_path.name
-            if source_path.parent == destination_dir:
-                continue
-
-            if target_path.exists():
-                failures.append(f"{target_path}: destination already exists")
-                continue
-
-            try:
-                if self._clipboard_mode == "copy":
-                    if source_path.is_dir():
-                        shutil.copytree(source_path, target_path)
-                    else:
-                        shutil.copy2(source_path, target_path)
-                    copied_count += 1
-                elif self._clipboard_mode == "cut":
-                    shutil.move(str(source_path), str(target_path))
-                    moved_count += 1
-            except OSError as error:
-                failures.append(f"{source_path} -> {target_path}: {error}")
-
-        if self._clipboard_mode == "cut" and moved_count > 0:
-            self._clipboard_paths = [
-                p for p in self._clipboard_paths if Path(p).exists()
-            ]
-            if not self._clipboard_paths:
-                self._clipboard_mode = None
+        result = paste_items(self._clipboard_paths, self._clipboard_mode, destination_dir)
+        self._clipboard_paths = result.clipboard_paths
+        self._clipboard_mode = result.clipboard_mode
 
         self.refresh()
 
-        if failures:
+        if result.failures:
             QMessageBox.warning(
                 self,
                 "Paste",
-                "Some items could not be pasted:\n" + "\n".join(failures),
+                "Some items could not be pasted:\n" + "\n".join(result.failures),
             )
 
-        if copied_count > 0:
-            self.status.showMessage(f"Pasted {copied_count} copied item(s)", 2500)
-        elif moved_count > 0:
-            self.status.showMessage(f"Moved {moved_count} item(s)", 2500)
+        if result.copied_count > 0:
+            self.status.showMessage(f"Pasted {result.copied_count} copied item(s)", 2500)
+        elif result.moved_count > 0:
+            self.status.showMessage(f"Moved {result.moved_count} item(s)", 2500)
 
     def rename_selected(self) -> None:
         paths = self.selected_paths()
@@ -773,15 +395,11 @@ class ExplorerWindow(QMainWindow):
         new_name, ok = QInputDialog.getText(self, "Rename", "New name:", text=source.name)
         if not ok or not new_name.strip():
             return
-
-        destination = source.with_name(new_name.strip())
-        if destination.exists():
-            QMessageBox.warning(self, "Rename", "An item with this name already exists.")
-            return
-
         try:
-            source.rename(destination)
+            rename_item(source, new_name.strip())
             self.refresh()
+        except FileExistsError:
+            QMessageBox.warning(self, "Rename", "An item with this name already exists.")
         except OSError as error:
             QMessageBox.critical(self, "Rename failed", str(error))
 
@@ -790,19 +408,11 @@ class ExplorerWindow(QMainWindow):
         if not paths:
             return
 
-        dialog = DeleteConfirmDialog(self._build_delete_confirmation_message(paths), self)
+        dialog = DeleteConfirmDialog(build_delete_confirmation_message(paths), self)
         if dialog.exec() != QDialog.Accepted:
             return
 
-        failures: list[str] = []
-        for path in paths:
-            try:
-                if os.path.isdir(path):
-                    shutil.rmtree(path)
-                else:
-                    os.remove(path)
-            except OSError as error:
-                failures.append(f"{path}: {error}")
+        failures = delete_items(paths)
 
         self.refresh()
         if failures:
@@ -813,9 +423,8 @@ class ExplorerWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, "New Folder", "Folder name:", text="New Folder")
         if not ok or not name.strip():
             return
-        destination = parent / name.strip()
         try:
-            destination.mkdir(parents=False, exist_ok=False)
+            create_folder(parent, name.strip())
             self.refresh()
         except OSError as error:
             QMessageBox.critical(self, "New Folder failed", str(error))
@@ -888,102 +497,20 @@ class ExplorerWindow(QMainWindow):
                 item = QListWidgetItem()
                 item.setText(entry)
                 item.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
-                item.setIcon(self._thumbnail_icon_for_path(entry_path))
+                if self.thumbnail_provider is not None:
+                    item.setIcon(
+                        self.thumbnail_provider.icon_for_path(
+                            entry_path,
+                            self.thumbnail_view.iconSize(),
+                        )
+                    )
+                else:
+                    item.setIcon(self.fs_model.iconProvider().icon(QFileIconProvider.File))
 
                 item.setData(Qt.UserRole, entry_path)
                 self.thumbnail_view.addItem(item)
         except OSError:
             pass
-
-    def _thumbnail_icon_for_path(self, path: str) -> QIcon:
-        if os.path.isdir(path):
-            return self.fs_model.iconProvider().icon(QFileIconProvider.Folder)
-
-        icon_size = self.thumbnail_view.iconSize()
-        cache_key = self._thumbnail_cache_key(path, icon_size)
-        if cache_key is not None:
-            cached_icon = self._thumbnail_icon_cache.get(cache_key)
-            if cached_icon is not None:
-                return cached_icon
-
-        suffix = Path(path).suffix.lower()
-        preview = QPixmap()
-        if suffix in self._PREVIEWABLE_IMAGE_EXTENSIONS:
-            preview = QPixmap(path)
-        elif (
-            suffix in self._PREVIEWABLE_DOCUMENT_EXTENSIONS
-            or suffix in self._PREVIEWABLE_VIDEO_EXTENSIONS
-        ):
-            preview = self._quicklook_preview_pixmap(path, icon_size)
-
-        if not preview.isNull():
-            icon = self._icon_from_preview_pixmap(preview, icon_size)
-        else:
-            icon = self.fs_model.iconProvider().icon(QFileIconProvider.File)
-
-        if cache_key is not None:
-            if len(self._thumbnail_icon_cache) > 500:
-                self._thumbnail_icon_cache.clear()
-            self._thumbnail_icon_cache[cache_key] = icon
-
-        return icon
-
-    def _thumbnail_cache_key(self, path: str, icon_size: QSize) -> tuple[str, int, int, int, int] | None:
-        try:
-            stat = os.stat(path)
-            return (
-                path,
-                stat.st_mtime_ns,
-                stat.st_size,
-                icon_size.width(),
-                icon_size.height(),
-            )
-        except OSError:
-            return None
-
-    @staticmethod
-    def _icon_from_preview_pixmap(preview: QPixmap, icon_size: QSize) -> QIcon:
-        scaled = preview.scaled(
-            icon_size,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        canvas = QPixmap(icon_size)
-        canvas.fill(Qt.transparent)
-
-        painter = QPainter(canvas)
-        x = (icon_size.width() - scaled.width()) // 2
-        y = (icon_size.height() - scaled.height()) // 2
-        painter.drawPixmap(x, y, scaled)
-        painter.end()
-        return QIcon(canvas)
-
-    @staticmethod
-    def _quicklook_preview_pixmap(path: str, icon_size: QSize) -> QPixmap:
-        preview_size = str(max(icon_size.width(), icon_size.height(), 256))
-        try:
-            with tempfile.TemporaryDirectory(prefix="winfile-preview-") as temp_dir:
-                subprocess.run(
-                    ["qlmanage", "-t", "-s", preview_size, "-o", temp_dir, path],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-
-                preview_files = sorted(
-                    Path(temp_dir).glob("*.png"),
-                    key=lambda candidate: candidate.stat().st_mtime_ns,
-                    reverse=True,
-                )
-
-                for preview_file in preview_files:
-                    pixmap = QPixmap(str(preview_file))
-                    if not pixmap.isNull():
-                        return pixmap
-        except OSError:
-            pass
-
-        return QPixmap()
 
     def toggle_view_mode(self) -> None:
         if self._view_mode == "list":
@@ -1023,7 +550,7 @@ def run() -> None:
     app = QApplication([])
     app.setApplicationName("WinFile")
     app.setStyle("Fusion")
-    app.setStyleSheet(_xp_stylesheet())
+    app.setStyleSheet(xp_stylesheet())
     window = ExplorerWindow()
     window.show()
     app.exec()
