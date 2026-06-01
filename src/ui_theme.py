@@ -93,6 +93,14 @@ QTreeView {
     gridline-color: #d6d6d6;
 }
 
+QListWidget {
+    background: #fffdf3;
+    border: 1px solid #b8ad8a;
+    color: #000000;
+    selection-background-color: #316ac5;
+    selection-color: #ffffff;
+}
+
 QHeaderView::section {
     background: #d4d0c8;
     border: 1px solid #9b9b9b;

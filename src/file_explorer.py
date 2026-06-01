@@ -95,6 +95,8 @@ class ExplorerWindow(QMainWindow):
         self.tree_view.setDefaultDropAction(Qt.MoveAction)
         self.tree_view.set_move_confirm_callback(self._confirm_drag_move)
         self.tree_view.clicked.connect(self._on_tree_clicked)
+        # Disable edit triggers (no rename on Enter or double-click)
+        self.tree_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
         self.list_view = ConfirmingDropTreeView(self.splitter)
         self.list_view.setModel(self.fs_model)
@@ -264,7 +266,12 @@ class ExplorerWindow(QMainWindow):
         menu.addAction("New Folder", self.new_folder)
         menu.addAction("Open Terminal", self.open_terminal)
         menu.addAction("Refresh", self.refresh)
-        menu.exec(self.list_view.viewport().mapToGlobal(pos))
+        source = self.sender()
+        if isinstance(source, (QTreeView, QListWidget)):
+            global_pos = source.viewport().mapToGlobal(pos)
+        else:
+            global_pos = self.mapToGlobal(pos)
+        menu.exec(global_pos)
 
     def current_path(self) -> str:
         root_index = self.list_view.rootIndex()
