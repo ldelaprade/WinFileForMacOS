@@ -43,7 +43,23 @@ python -m src.main
 make build
 ```
 
-Outputs `dist/eXPlorer.app`. Drag to `/Applications` or `open dist/eXPlorer.app`.
+Outputs `dist/WinFileXP.app`. Drag to `/Applications` or `open dist/WinFileXP.app`.
+
+### Trace packaged crashes (recommended when app exits immediately)
+
+Build a console/debug variant and run it from Terminal to see the full traceback:
+
+```bash
+make trace-debug
+```
+
+This creates `dist/WinFileXP-debug/WinFileXP-debug` with PyInstaller debug logging.
+If it still exits, check:
+
+- `build/WinFileXP-debug/warn-WinFileXP-debug.txt`
+- `build/WinFileXP-debug/xref-WinFileXP-debug.html`
+
+Note: `make build` and `make trace-debug` now prefer `.venv/bin/python` when available, so GUI dependencies like `PySide6` are included from your project environment.
 
 ### Signed + notarized release (for sharing)
 

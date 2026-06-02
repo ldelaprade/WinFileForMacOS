@@ -6,26 +6,44 @@ APP_NAME      := WinFileXP
 APP_BUNDLE    := dist/$(APP_NAME).app
 DMG_NAME      := dist/$(APP_NAME).dmg
 ENTRY         := src/main.py
+PYTHON        ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+PIP           := $(PYTHON) -m pip
+PYINSTALLER   := $(PYTHON) -m PyInstaller
 
 # Code-signing: fill in before running `make release`
 DEV_ID        ?= Developer ID Application: Your Name (TEAMID)
 PROFILE       ?= notarytool-profile
 BUNDLE_ID     ?= com.yourname.explorer
 
-.PHONY: all build release dmg notarize staple clean clean-all
+.PHONY: all build build-debug trace-debug release dmg notarize staple clean clean-all
 
 all: build
 
 # ── Local unsigned build ──────────────────────────────────────────────────────
 build:
-	pip install -q pyinstaller
-	pyinstaller --windowed \
+	$(PIP) install -q -r requirements.txt pyinstaller
+	$(PYINSTALLER) --windowed \
 	            --name "$(APP_NAME)" \
 	            --noconfirm \
 	            $(ENTRY)
 	@echo
 	@echo "Built: $(APP_BUNDLE)"
 	@echo "Drag to /Applications or run: open $(APP_BUNDLE)"
+
+# ── Debug build for crash tracing ───────────────────────────────────────────
+build-debug:
+	$(PIP) install -q -r requirements.txt pyinstaller
+	$(PYINSTALLER) --console \
+	            --debug all \
+	            --log-level TRACE \
+	            --name "$(APP_NAME)-debug" \
+	            --noconfirm \
+	            $(ENTRY)
+	@echo
+	@echo "Built debug executable: dist/$(APP_NAME)-debug/$(APP_NAME)-debug"
+
+trace-debug: build-debug
+	./dist/$(APP_NAME)-debug/$(APP_NAME)-debug
 
 # ── Signed release build ─────────────────────────────────────────────────────
 # Prerequisites:
