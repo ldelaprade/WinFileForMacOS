@@ -12,6 +12,7 @@ A minimal Windows XP-style file explorer starter for macOS using Python and PySi
 - Status bar (item count and selected size)
 - Context menu operations (Open, Rename, Delete, New Folder, Refresh)
 - Drag-and-drop move between folders
+- Drag selected files out to external apps and web upload drop zones
 - Shortcuts: `F2` rename, `Delete` remove, `F5` refresh, `Alt+Left/Right` back/forward, `Alt+Up` or `Backspace` parent, `Ctrl+A` select all, `Enter` open, `Ctrl+C/X/V` copy-cut-paste, `Alt+D` or `Ctrl+L` focus path
 - Right pane supports multi-selection for bulk move/delete
 

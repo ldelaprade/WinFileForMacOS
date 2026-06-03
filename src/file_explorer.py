@@ -35,7 +35,7 @@ from .dialogs import (
     build_delete_confirmation_message,
     build_move_confirmation_message,
 )
-from .dragdrop_views import ConfirmingDropTreeView
+from .dragdrop_views import ConfirmingDropTreeView, FileDragListWidget
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
 from .thumbnail_previews import ThumbnailPreviewProvider
@@ -120,7 +120,7 @@ class ExplorerWindow(QMainWindow):
             lambda *_: self._update_status()
         )
 
-        self.thumbnail_view = QListWidget(self.splitter)
+        self.thumbnail_view = FileDragListWidget(self.splitter)
         self.thumbnail_view.setViewMode(QListWidget.IconMode)
         self.thumbnail_view.setResizeMode(QListWidget.Adjust)
         self.thumbnail_view.setIconSize(QSize(192, 192))

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QDropEvent
-from PySide6.QtWidgets import QFileSystemModel, QTreeView
+from PySide6.QtCore import QMimeData, Qt, QUrl
+from PySide6.QtGui import QDrag, QDropEvent
+from PySide6.QtWidgets import QFileSystemModel, QListWidget, QTreeView
 
 
 class ConfirmingDropTreeView(QTreeView):
@@ -28,6 +28,20 @@ class ConfirmingDropTreeView(QTreeView):
             event.ignore()
             return
         super().dropEvent(event)
+
+    def startDrag(self, supported_actions: Qt.DropAction) -> None:
+        source_paths = self._selected_paths_for_drag()
+        if not source_paths:
+            super().startDrag(supported_actions)
+            return
+
+        mime_data = QMimeData()
+        urls = [QUrl.fromLocalFile(path) for path in source_paths]
+        mime_data.setUrls(urls)
+
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.MoveAction)
 
     def _resolve_drop_destination_path(self, event: QDropEvent) -> str:
         if hasattr(event, "position"):
@@ -61,3 +75,28 @@ class ConfirmingDropTreeView(QTreeView):
                 selected_rows = selection_model.selectedRows()
                 return [model.filePath(index) for index in selected_rows if index.isValid()]
         return []
+
+    def _selected_paths_for_drag(self) -> list[str]:
+        selection_model = self.selectionModel()
+        model = self.model()
+        if selection_model is None or not isinstance(model, QFileSystemModel):
+            return []
+        selected_rows = selection_model.selectedRows()
+        return [model.filePath(index) for index in selected_rows if index.isValid()]
+
+
+class FileDragListWidget(QListWidget):
+    def startDrag(self, supported_actions: Qt.DropAction) -> None:
+        selected_items = self.selectedItems()
+        source_paths = [item.data(Qt.UserRole) for item in selected_items if item.data(Qt.UserRole)]
+        if not source_paths:
+            super().startDrag(supported_actions)
+            return
+
+        mime_data = QMimeData()
+        urls = [QUrl.fromLocalFile(path) for path in source_paths]
+        mime_data.setUrls(urls)
+
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.MoveAction)
