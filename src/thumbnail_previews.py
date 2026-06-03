@@ -36,10 +36,16 @@ class ThumbnailPreviewProvider:
         ".webm",
     }
 
-    def __init__(self, icon_provider: QFileIconProvider, max_cache_size: int = 500) -> None:
+    def __init__(
+        self,
+        icon_provider: QFileIconProvider,
+        max_cache_size: int = 500,
+        quicklook_min_preview_size: int = 128,
+    ) -> None:
         self.icon_provider = icon_provider
         self.native_icon_provider = QFileIconProvider()
         self.max_cache_size = max_cache_size
+        self.quicklook_min_preview_size = max(64, quicklook_min_preview_size)
         self._thumbnail_icon_cache: dict[tuple[str, int, int, int, int], QIcon] = {}
 
     def icon_for_path(self, path: str, icon_size: QSize) -> QIcon:
@@ -140,9 +146,10 @@ class ThumbnailPreviewProvider:
 
         return pixmap.copy(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 
-    @staticmethod
-    def _quicklook_preview_pixmap(path: str, icon_size: QSize) -> QPixmap:
-        preview_size = str(max(icon_size.width(), icon_size.height(), 256))
+    def _quicklook_preview_pixmap(self, path: str, icon_size: QSize) -> QPixmap:
+        preview_size = str(
+            max(icon_size.width(), icon_size.height(), self.quicklook_min_preview_size)
+        )
         try:
             with tempfile.TemporaryDirectory(prefix="winfile-preview-") as temp_dir:
                 subprocess.run(

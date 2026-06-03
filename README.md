@@ -13,6 +13,7 @@ A minimal Windows XP-style file explorer starter for macOS using Python and PySi
 - Context menu operations (Open, Rename, Delete, New Folder, Refresh)
 - Drag-and-drop move between folders
 - Drag selected files out to external apps and web upload drop zones
+- Browse SMB / Samba / NFS network shares via a permanent **Network** node in the left panel
 - Shortcuts: `F2` rename, `Delete` remove, `F5` refresh, `Alt+Left/Right` back/forward, `Alt+Up` or `Backspace` parent, `Ctrl+A` select all, `Enter` open, `Ctrl+C/X/V` copy-cut-paste, `Alt+D` or `Ctrl+L` focus path
 - Right pane supports multi-selection for bulk move/delete
 
@@ -35,6 +36,9 @@ python -m src.main
 - Deletion is permanent in this version (no trash integration yet).
 - Drag-and-drop move now asks for confirmation with item count and destination preview.
 - Delete confirmation now shows selected item names/count.
+- To browse a network share: right-click the **Network** node in the left panel → *Connect Network Share…* and enter an SMB URL (e.g. `smb://server/share` or `smb://server/share/folder`). Alternatively, type the URL directly in the address bar and press Enter. macOS will prompt for credentials if needed, then the share appears under *Network* and WinFileXP navigates into it automatically.
+- Already-mounted shares (Windows/Samba/NFS/AFP) appear automatically under *Network* when the app starts.
+- Right-click a mounted share under *Network* to **Browse**, **Disconnect**, or connect another share.
 
 ## Build
 

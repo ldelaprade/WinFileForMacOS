@@ -3,6 +3,7 @@ try:
 except ImportError:
     # PyInstaller may execute this as a top-level script where package-relative
     # imports are unavailable.
+
     from src.file_explorer import run
 
 

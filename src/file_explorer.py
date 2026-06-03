@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import quote, urlparse, urlunparse
 
 from PySide6.QtCore import QDir, QModelIndex, QPoint, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QFileIconProvider,
     QFileSystemModel,
     QInputDialog,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -27,6 +29,8 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QToolBar,
     QTreeView,
+    QVBoxLayout,
+    QWidget,
 )
 
 from .dialogs import (
@@ -36,6 +40,7 @@ from .dialogs import (
     build_move_confirmation_message,
 )
 from .dragdrop_views import ConfirmingDropTreeView, FileDragListWidget
+from .network_panel import NetworkPanel, mount_smb_share, resolve_smb_mount_paths, unmount_share
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
 from .thumbnail_previews import ThumbnailPreviewProvider
@@ -53,6 +58,7 @@ class ExplorerWindow(QMainWindow):
         self._clipboard_mode: str | None = None
         self._view_mode: str = "list"  # "list" or "thumbnail"
         self.thumbnail_provider: ThumbnailPreviewProvider | None = None
+        self._network_poll_attempts = 0
 
         self._setup_models()
         self._setup_views()
@@ -72,18 +78,29 @@ class ExplorerWindow(QMainWindow):
             QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs | QDir.Files
         )
         self.fs_model.setIconProvider(icon_provider)
-        self.fs_model.setRootPath("")
+        self.fs_model.setRootPath(str(Path.home()))
+        self.fs_model.directoryLoaded.connect(self._on_directory_loaded)
         self.dir_model = QFileSystemModel(self)
         self.dir_model.setReadOnly(False)
         self.dir_model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot)
         self.dir_model.setIconProvider(icon_provider)
-        self.dir_model.setRootPath("")
+        self.dir_model.setRootPath(str(Path.home()))
 
     def _setup_views(self) -> None:
         self.splitter = QSplitter(self)
         self.setCentralWidget(self.splitter)
 
-        self.tree_view = ConfirmingDropTreeView(self.splitter)
+        left_panel = QSplitter(Qt.Vertical, self.splitter)
+
+        local_section = QWidget(left_panel)
+        local_layout = QVBoxLayout(local_section)
+        local_layout.setContentsMargins(0, 0, 0, 0)
+        local_layout.setSpacing(4)
+        local_header = QLabel("Local folders", local_section)
+        local_header.setStyleSheet("font-weight: bold; padding-left: 4px;")
+        local_layout.addWidget(local_header)
+
+        self.tree_view = ConfirmingDropTreeView(local_section)
         self.tree_view.setModel(self.dir_model)
         self.tree_view.setHeaderHidden(True)
         self.tree_view.setColumnHidden(1, True)
@@ -97,6 +114,27 @@ class ExplorerWindow(QMainWindow):
         self.tree_view.clicked.connect(self._on_tree_clicked)
         # Disable edit triggers (no rename on Enter or double-click)
         self.tree_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        local_layout.addWidget(self.tree_view)
+
+        network_section = QWidget(left_panel)
+        network_layout = QVBoxLayout(network_section)
+        network_layout.setContentsMargins(0, 0, 0, 0)
+        network_layout.setSpacing(4)
+        network_header = QLabel("Network", network_section)
+        network_header.setStyleSheet("font-weight: bold; padding-left: 4px;")
+        network_layout.addWidget(network_header)
+
+        self.network_panel = NetworkPanel(
+            connect_callback=self.connect_network_share,
+            parent=network_section,
+        )
+        self.network_panel.navigate_requested.connect(
+            lambda path: self.navigate_to(path, record_history=True)
+        )
+        self.network_panel.edit_connection_requested.connect(
+            self._edit_network_connection_parameters
+        )
+        network_layout.addWidget(self.network_panel)
 
         self.list_view = ConfirmingDropTreeView(self.splitter)
         self.list_view.setModel(self.fs_model)
@@ -123,8 +161,8 @@ class ExplorerWindow(QMainWindow):
         self.thumbnail_view = FileDragListWidget(self.splitter)
         self.thumbnail_view.setViewMode(QListWidget.IconMode)
         self.thumbnail_view.setResizeMode(QListWidget.Adjust)
-        self.thumbnail_view.setIconSize(QSize(192, 192))
-        self.thumbnail_view.setGridSize(QSize(236, 256))
+        self.thumbnail_view.setIconSize(QSize(96, 96))
+        self.thumbnail_view.setGridSize(QSize(132, 152))
         self.thumbnail_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.thumbnail_view.setDragEnabled(True)
         self.thumbnail_view.setAcceptDrops(True)
@@ -142,6 +180,9 @@ class ExplorerWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 1)
+        left_panel.setSizes([420, 140])
+        left_panel.setStretchFactor(0, 0)
+        left_panel.setStretchFactor(1, 0)
 
     def _setup_toolbar(self) -> None:
         toolbar = QToolBar("Navigation", self)
@@ -213,6 +254,14 @@ class ExplorerWindow(QMainWindow):
         open_enter_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         open_enter_shortcut.activated.connect(self.open_selected)
 
+        tree_return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), self.tree_view)
+        tree_return_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        tree_return_shortcut.activated.connect(self._on_tree_enter)
+
+        tree_enter_shortcut = QShortcut(QKeySequence(Qt.Key_Enter), self.tree_view)
+        tree_enter_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        tree_enter_shortcut.activated.connect(self._on_tree_enter)
+
         QShortcut(QKeySequence.StandardKey.Copy, self, activated=self.copy_selected)
         QShortcut(QKeySequence.StandardKey.Cut, self, activated=self.cut_selected)
         QShortcut(QKeySequence.StandardKey.Paste, self, activated=self.paste_into_current)
@@ -221,6 +270,11 @@ class ExplorerWindow(QMainWindow):
 
         QShortcut(QKeySequence("Alt+D"), self, activated=self.focus_address_bar)
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self.focus_address_bar)
+
+    def _on_tree_enter(self) -> None:
+        index = self.tree_view.currentIndex()
+        if index.isValid():
+            self._on_tree_clicked(index)
 
     def _on_tree_clicked(self, index: QModelIndex) -> None:
         if not index.isValid():
@@ -285,6 +339,8 @@ class ExplorerWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid path", f"Folder not found:\n{normalized}")
             return
 
+        self.fs_model.setRootPath(normalized)
+        self.dir_model.setRootPath(normalized)
         root_index = self.fs_model.index(normalized)
         tree_index = self.dir_model.index(normalized)
         self.tree_view.setCurrentIndex(tree_index)
@@ -292,15 +348,168 @@ class ExplorerWindow(QMainWindow):
         self.list_view.setRootIndex(root_index)
         self.address_bar.setText(normalized)
 
-        self._populate_thumbnail_view(normalized)
+        if self._view_mode == "thumbnail":
+            self._populate_thumbnail_view(normalized)
 
         if record_history:
             self.navigation_history.record(normalized)
         self._update_nav_actions()
         self._update_status()
 
+    def _on_directory_loaded(self, path: str) -> None:
+        """Called by QFileSystemModel once it finishes scanning a directory.
+
+        Refreshes the list view root index so the view fills immediately after
+        the model completes async directory scanning instead of appearing blank.
+        """
+        current = self.current_path()
+        if os.path.normpath(path) == os.path.normpath(current):
+            self.list_view.setRootIndex(self.fs_model.index(current))
+            self._update_status()
+
     def _on_address_enter(self) -> None:
-        self.navigate_to(self.address_bar.text().strip(), record_history=True)
+        entered = self.address_bar.text().strip()
+        if entered.lower().startswith("smb://"):
+            self.connect_network_share(entered)
+            return
+        self.navigate_to(entered, record_history=True)
+
+    def connect_network_share(self, share_url: str | None = None) -> None:
+        target_url = (share_url or "").strip()
+        if not target_url:
+            target_url, ok = QInputDialog.getText(
+                self,
+                "Connect Network Share",
+                "SMB URL (example: smb://server/share):",
+                text="smb://",
+            )
+            if not ok:
+                return
+            target_url = target_url.strip()
+
+        if not target_url:
+            return
+
+        mount_root, target_path = resolve_smb_mount_paths(target_url)
+        if mount_root is None:
+            QMessageBox.warning(self, "Connect Network Share", "Invalid SMB URL.")
+            return
+
+        if os.path.isdir(target_path):
+            self._refresh_network_panel_with_retries()
+            self.navigate_to(target_path, record_history=True)
+            return
+
+        if os.path.isdir(mount_root):
+            self._refresh_network_panel_with_retries()
+            self.navigate_to(mount_root, record_history=True)
+            return
+
+        if not mount_smb_share(target_url):
+            QMessageBox.warning(
+                self,
+                "Connect Network Share",
+                "Could not initiate SMB connection. Check address and try again.",
+            )
+            return
+
+        self.status.showMessage(
+            "Connecting to network share. Complete login if prompted...",
+            6000,
+        )
+        self._network_poll_attempts = 0
+        self._poll_for_mounted_share(mount_root, target_path)
+
+    def _edit_network_connection_parameters(self, mount_path: str, source_url: str) -> None:
+        parsed = urlparse(source_url)
+        if parsed.scheme.lower() != "smb":
+            QMessageBox.information(
+                self,
+                "Edit Connection Parameters",
+                "Connection parameter editing is currently supported for SMB shares only.",
+            )
+            return
+
+        current_username = parsed.username or ""
+        username, ok = QInputDialog.getText(
+            self,
+            "Edit Connection Parameters",
+            "User name (leave empty to prompt at connect):",
+            text=current_username,
+        )
+        if not ok:
+            return
+        username = username.strip()
+
+        password, ok = QInputDialog.getText(
+            self,
+            "Edit Connection Parameters",
+            "Password (optional):",
+            QLineEdit.Password,
+            "",
+        )
+        if not ok:
+            return
+
+        host = parsed.hostname or ""
+        if not host or not parsed.path:
+            QMessageBox.warning(
+                self,
+                "Edit Connection Parameters",
+                "Cannot parse current SMB connection URL.",
+            )
+            return
+
+        if username:
+            userinfo = quote(username, safe="")
+            if password:
+                userinfo = f"{userinfo}:{quote(password, safe='')}"
+            netloc = f"{userinfo}@{host}"
+            if parsed.port:
+                netloc = f"{netloc}:{parsed.port}"
+        else:
+            netloc = host
+            if parsed.port:
+                netloc = f"{netloc}:{parsed.port}"
+
+        rebuilt_url = urlunparse(("smb", netloc, parsed.path, "", "", ""))
+
+        if os.path.isdir(mount_path):
+            unmount_share(mount_path)
+        self.connect_network_share(rebuilt_url)
+
+    def _poll_for_mounted_share(self, mount_root: str, target_path: str) -> None:
+        if os.path.isdir(target_path):
+            self._refresh_network_panel_with_retries()
+            self.navigate_to(target_path, record_history=True)
+            return
+
+        if os.path.isdir(mount_root):
+            self._refresh_network_panel_with_retries()
+            self.navigate_to(mount_root, record_history=True)
+            return
+
+        self._network_poll_attempts += 1
+        if self._network_poll_attempts > 20:
+            QMessageBox.information(
+                self,
+                "Connect Network Share",
+                "Share was not mounted yet. If login prompt is open, finish it and retry.\n\n"
+                f"Expected mount path:\n{mount_root}",
+            )
+            return
+
+        QTimer.singleShot(1000, lambda: self._poll_for_mounted_share(mount_root, target_path))
+
+    def _refresh_network_panel_with_retries(self, retries: int = 4, delay_ms: int = 500) -> None:
+        """Refresh network panel multiple times to absorb post-mount timing lag."""
+        self.network_panel.refresh_shares()
+        if retries <= 0:
+            return
+        QTimer.singleShot(
+            delay_ms,
+            lambda: self._refresh_network_panel_with_retries(retries - 1, delay_ms),
+        )
 
     def focus_address_bar(self) -> None:
         self.address_bar.setFocus()
@@ -445,14 +654,13 @@ class ExplorerWindow(QMainWindow):
 
     def refresh(self) -> None:
         current = self.current_path()
-        self.fs_model.setRootPath("")
-        self.dir_model.setRootPath("")
         index = self.fs_model.index(current)
         tree_index = self.dir_model.index(current)
         self.list_view.setRootIndex(index)
         self.tree_view.setCurrentIndex(tree_index)
         self.tree_view.scrollTo(tree_index)
-        self._populate_thumbnail_view(current)
+        if self._view_mode == "thumbnail":
+            self._populate_thumbnail_view(current)
         self._update_status()
 
     def _update_status(self) -> None:
