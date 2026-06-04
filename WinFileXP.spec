@@ -42,9 +42,3 @@ coll = COLLECT(
     upx_exclude=[],
     name='WinFileXP',
 )
-app = BUNDLE(
-    coll,
-    name='WinFileXP.app',
-    icon=None,
-    bundle_identifier=None,
-)

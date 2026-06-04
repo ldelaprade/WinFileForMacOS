@@ -7,7 +7,9 @@ from urllib.parse import unquote, urlparse
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWidgetItem, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWidgetItem, QWidget, QFileIconProvider
+
+from .ui_theme import XPIconProvider
 
 
 def get_mounted_network_shares() -> list[tuple[str, str, str]]:
@@ -135,7 +137,8 @@ class NetworkPanel(QTreeWidget):
         self._connect_callback = connect_callback
         style = QApplication.style()
         self._network_root_icon = style.standardIcon(QStyle.SP_DriveNetIcon)
-        self._folder_icon = style.standardIcon(QStyle.SP_DirIcon)
+        icon_provider = XPIconProvider()
+        self._folder_icon = icon_provider.icon(QFileIconProvider.Folder)
 
         self.setHeaderHidden(True)
         self.setRootIsDecorated(True)
