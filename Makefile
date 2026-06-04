@@ -15,7 +15,7 @@ DEV_ID        ?= Developer ID Application: Your Name (TEAMID)
 PROFILE       ?= notarytool-profile
 BUNDLE_ID     ?= com.yourname.explorer
 
-.PHONY: all build build-debug trace-debug release dmg notarize staple clean clean-all
+.PHONY: all build build-debug trace-debug release dmg notarize staple build-linux build-windows clean clean-all
 
 all: build
 
@@ -44,6 +44,31 @@ build-debug:
 
 trace-debug: build-debug
 	./dist/$(APP_NAME)-debug/$(APP_NAME)-debug
+
+# ── Linux build ────────────────────────────────────────────────────────────────
+build-linux:
+	$(PIP) install -q -r requirements.txt pyinstaller
+	$(PYINSTALLER) --windowed \
+	            --onefile \
+	            --name "$(APP_NAME)" \
+	            --noconfirm \
+	            $(ENTRY)
+	@echo
+	@echo "Built Linux executable: dist/$(APP_NAME)"
+	@echo "Run: ./dist/$(APP_NAME)"
+
+# ── Windows build ──────────────────────────────────────────────────────────────
+build-windows:
+	$(PIP) install -q -r requirements.txt pyinstaller
+	$(PYINSTALLER) --windowed \
+	            --onefile \
+	            --name "$(APP_NAME)" \
+	            --noconfirm \
+	            --icon none \
+	            $(ENTRY)
+	@echo
+	@echo "Built Windows executable: dist/$(APP_NAME).exe"
+	@echo "Run: dist/$(APP_NAME).exe"
 
 # ── Signed release build ─────────────────────────────────────────────────────
 # Prerequisites:
