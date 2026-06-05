@@ -314,6 +314,7 @@ class ExplorerWindow(QMainWindow):
     def _show_context_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)
         menu.addAction("Open", self.open_selected)
+        menu.addAction("Edit", self.edit_selected)
         menu.addAction("Rename", self.rename_selected)
         menu.addAction("Delete", self.delete_selected)
         menu.addSeparator()
@@ -559,6 +560,35 @@ class ExplorerWindow(QMainWindow):
             self.navigate_to(path, record_history=True)
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def edit_selected(self) -> None:
+        paths = self.selected_paths()
+        if not paths:
+            return
+        path = paths[0]
+        if os.path.isdir(path):
+            return
+
+        import platform
+        import shutil
+        try:
+            if platform.system() == "Darwin":  # macOS
+                os.system(f'open -a TextEdit "{path}"')
+            elif platform.system() == "Linux":
+                # Try common text editors in order of preference
+                editors = ["geany","code", "gedit", "kate", "mousepad", "leafpad", "nano"]
+                for editor in editors:
+                    if shutil.which(editor):
+                        os.system(f'{editor} "{path}" &')
+                        return
+                # Fallback to xdg-open if no specific editor found
+                os.system(f'xdg-open "{path}"')
+            elif platform.system() == "Windows":
+                os.system(f'notepad "{path}"')
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        except OSError as error:
+            QMessageBox.critical(self, "Edit failed", str(error))
 
     def copy_selected(self) -> None:
         paths = self.selected_paths()
