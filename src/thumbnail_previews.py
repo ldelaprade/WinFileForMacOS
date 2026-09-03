@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QFileInfo, QRect, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QImageReader, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QFileIconProvider
 
 
 class ThumbnailPreviewProvider:
+    _DISK_CACHE_VERSION = "v1"
     _PREVIEWABLE_IMAGE_EXTENSIONS = {
         ".bmp",
         ".gif",
@@ -47,8 +50,19 @@ class ThumbnailPreviewProvider:
         self.max_cache_size = max_cache_size
         self.quicklook_min_preview_size = max(64, quicklook_min_preview_size)
         self._thumbnail_icon_cache: dict[tuple[str, int, int, int, int], QIcon] = {}
+        self._disk_cache_root: Path | None = Path.home() / ".wfcache" / "thumbnails"
+        try:
+            self._disk_cache_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Continue without disk cache if folder creation is unavailable.
+            self._disk_cache_root = None
 
-    def icon_for_path(self, path: str, icon_size: QSize) -> QIcon:
+    def icon_for_path(
+        self,
+        path: str,
+        icon_size: QSize,
+        allow_expensive_previews: bool = True,
+    ) -> QIcon:
         cache_key = self._thumbnail_cache_key(path, icon_size)
         if cache_key is not None:
             cached_icon = self._thumbnail_icon_cache.get(cache_key)
@@ -63,18 +77,14 @@ class ThumbnailPreviewProvider:
                 self._thumbnail_icon_cache[cache_key] = icon
             return icon
 
-        suffix = Path(path).suffix.lower()
-        preview = QPixmap()
-        if suffix in self._PREVIEWABLE_IMAGE_EXTENSIONS:
-            preview = QPixmap(path)
-        elif (
-            suffix in self._PREVIEWABLE_DOCUMENT_EXTENSIONS
-            or suffix in self._PREVIEWABLE_VIDEO_EXTENSIONS
-        ):
-            preview = self._quicklook_preview_pixmap(path, icon_size)
+        preview_image = self.preview_image_for_path(
+            path,
+            icon_size,
+            allow_expensive_previews=allow_expensive_previews,
+        )
 
-        if not preview.isNull():
-            icon = self._icon_from_preview_pixmap(preview, icon_size)
+        if preview_image is not None and not preview_image.isNull():
+            icon = self.icon_from_preview_image(preview_image, icon_size)
         else:
             icon = self._thumbnail_fallback_icon(path, icon_size)
 
@@ -84,6 +94,69 @@ class ThumbnailPreviewProvider:
             self._thumbnail_icon_cache[cache_key] = icon
 
         return icon
+
+    def supports_background_preview(
+        self,
+        path: str,
+        allow_expensive_previews: bool = True,
+    ) -> bool:
+        if os.path.isdir(path):
+            return False
+        suffix = Path(path).suffix.lower()
+        if suffix in self._PREVIEWABLE_IMAGE_EXTENSIONS:
+            return True
+        if allow_expensive_previews and (
+            suffix in self._PREVIEWABLE_DOCUMENT_EXTENSIONS
+            or suffix in self._PREVIEWABLE_VIDEO_EXTENSIONS
+        ):
+            return True
+        return False
+
+    def preview_image_for_path(
+        self,
+        path: str,
+        icon_size: QSize,
+        allow_expensive_previews: bool = True,
+    ) -> QImage | None:
+        suffix = Path(path).suffix.lower()
+        preview = QImage()
+        if suffix in self._PREVIEWABLE_IMAGE_EXTENSIONS:
+            preview = self._load_cached_image_preview(path, icon_size)
+            if preview.isNull():
+                preview = self._load_scaled_image_preview(path, icon_size)
+                if not preview.isNull():
+                    self._store_cached_image_preview(path, icon_size, preview)
+        elif allow_expensive_previews and (
+            suffix in self._PREVIEWABLE_DOCUMENT_EXTENSIONS
+            or suffix in self._PREVIEWABLE_VIDEO_EXTENSIONS
+        ):
+            preview = self._quicklook_preview_image(path, icon_size)
+
+        if preview.isNull():
+            return None
+        return self._trim_transparent_margins_image(preview)
+
+    @staticmethod
+    def icon_from_preview_image(preview: QImage, icon_size: QSize) -> QIcon:
+        pixmap = QPixmap.fromImage(preview)
+        if pixmap.isNull():
+            return QIcon()
+
+        scaled = pixmap.scaled(
+            icon_size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        canvas = QPixmap(icon_size)
+        canvas.fill(Qt.transparent)
+
+        painter = QPainter(canvas)
+        dpr = scaled.devicePixelRatio()
+        x = (icon_size.width() - int(scaled.width() / dpr)) // 2
+        y = (icon_size.height() - int(scaled.height() / dpr)) // 2
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
+        return QIcon(canvas)
 
     @staticmethod
     def _thumbnail_cache_key(path: str, icon_size: QSize) -> tuple[str, int, int, int, int] | None:
@@ -125,6 +198,12 @@ class ThumbnailPreviewProvider:
     @staticmethod
     def _trim_transparent_margins(pixmap: QPixmap) -> QPixmap:
         image = pixmap.toImage().convertToFormat(QImage.Format_ARGB32)
+        trimmed = ThumbnailPreviewProvider._trim_transparent_margins_image(image)
+        return QPixmap.fromImage(trimmed)
+
+    @staticmethod
+    def _trim_transparent_margins_image(image: QImage) -> QImage:
+        image = image.convertToFormat(QImage.Format_ARGB32)
         width = image.width()
         height = image.height()
 
@@ -142,11 +221,11 @@ class ThumbnailPreviewProvider:
                     max_y = max(max_y, y)
 
         if max_x < min_x or max_y < min_y:
-            return pixmap
+            return image
 
-        return pixmap.copy(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+        return image.copy(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 
-    def _quicklook_preview_pixmap(self, path: str, icon_size: QSize) -> QPixmap:
+    def _quicklook_preview_image(self, path: str, icon_size: QSize) -> QImage:
         preview_size = str(
             max(icon_size.width(), icon_size.height(), self.quicklook_min_preview_size)
         )
@@ -166,19 +245,19 @@ class ThumbnailPreviewProvider:
                 )
 
                 for preview_file in preview_files:
-                    pixmap = QPixmap(str(preview_file))
-                    if not pixmap.isNull():
-                        return pixmap
+                    preview = QImage(str(preview_file))
+                    if not preview.isNull():
+                        return preview
         except OSError:
             pass
 
-        return QPixmap()
+        return QImage()
 
     def _thumbnail_fallback_icon(self, path: str, icon_size: QSize) -> QIcon:
         native_icon = self.native_icon_provider.icon(QFileInfo(path))
         native_pixmap = native_icon.pixmap(icon_size)
         if not native_pixmap.isNull():
-            return self._icon_from_preview_pixmap(native_pixmap, icon_size)
+            return self.icon_from_preview_image(native_pixmap.toImage(), icon_size)
 
         suffix = Path(path).suffix.upper().lstrip(".")
         label = (suffix[:4] if suffix else "FILE")
@@ -186,6 +265,65 @@ class ThumbnailPreviewProvider:
 
     def _thumbnail_folder_icon(self, path: str, icon_size: QSize) -> QIcon:
         return self._draw_generic_folder_icon(icon_size)
+
+    def _load_scaled_image_preview(self, path: str, icon_size: QSize) -> QImage:
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+
+        source_size = reader.size()
+        target_edge = max(icon_size.width(), icon_size.height(), self.quicklook_min_preview_size)
+        if source_size.isValid() and source_size.width() > 0 and source_size.height() > 0:
+            scaled_size = QSize(source_size)
+            if source_size.width() > target_edge or source_size.height() > target_edge:
+                scaled_size.scale(target_edge, target_edge, Qt.KeepAspectRatio)
+                reader.setScaledSize(scaled_size)
+
+        preview = reader.read()
+        if preview.isNull():
+            return QImage()
+
+        if preview.hasAlphaChannel() and (preview.width() * preview.height()) <= 1_200_000:
+            return self._trim_transparent_margins_image(preview)
+        return preview
+
+    def _disk_cache_path_for_image(self, path: str, icon_size: QSize) -> Path | None:
+        if self._disk_cache_root is None:
+            return None
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+
+        key_source = (
+            f"{self._DISK_CACHE_VERSION}|{path}|{stat.st_mtime_ns}|{stat.st_size}|"
+            f"{icon_size.width()}x{icon_size.height()}"
+        )
+        digest = hashlib.sha1(key_source.encode("utf-8")).hexdigest()
+        return self._disk_cache_root / digest[:2] / f"{digest}.png"
+
+    def _load_cached_image_preview(self, path: str, icon_size: QSize) -> QImage:
+        cache_path = self._disk_cache_path_for_image(path, icon_size)
+        if cache_path is None or not cache_path.is_file():
+            return QImage()
+        preview = QImage(str(cache_path))
+        if preview.isNull():
+            return QImage()
+        return preview
+
+    def _store_cached_image_preview(self, path: str, icon_size: QSize, preview: QImage) -> None:
+        cache_path = self._disk_cache_path_for_image(path, icon_size)
+        if cache_path is None:
+            return
+        temp_path: Path | None = None
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = cache_path.parent / f"{cache_path.stem}.{uuid.uuid4().hex}.tmp"
+            if preview.save(str(temp_path), "PNG"):
+                os.replace(temp_path, cache_path)
+        except OSError:
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            return
 
     @staticmethod
     def _draw_generic_folder_icon(icon_size: QSize) -> QIcon:

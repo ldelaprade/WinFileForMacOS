@@ -1,14 +1,32 @@
 from __future__ import annotations
 
 import os
+from collections import deque
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
 
-from PySide6.QtCore import QDir, QModelIndex, QPoint, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import (
+    QDir,
+    QModelIndex,
+    QObject,
+    QPoint,
+    QRunnable,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
+    QColor,
     QDesktopServices,
+    QIcon,
+    QImage,
     QKeySequence,
+    QPainter,
+    QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -47,6 +65,49 @@ from .thumbnail_previews import ThumbnailPreviewProvider
 from .ui_theme import XPIconProvider, xp_stylesheet
 
 
+class _ThumbnailWorkerSignals(QObject):
+    previews_ready = Signal(int, object)
+    finished = Signal(int)
+
+
+class _ThumbnailPreviewWorker(QRunnable):
+    def __init__(
+        self,
+        token: int,
+        provider: ThumbnailPreviewProvider,
+        icon_size: QSize,
+        paths: list[str],
+        allow_expensive_previews: bool,
+    ) -> None:
+        super().__init__()
+        self.token = token
+        self.provider = provider
+        self.icon_size = icon_size
+        self.paths = paths
+        self.allow_expensive_previews = allow_expensive_previews
+        self.signals = _ThumbnailWorkerSignals()
+
+    def run(self) -> None:
+        batch: list[tuple[str, QImage | None]] = []
+        for path in self.paths:
+            preview = self.provider.preview_image_for_path(
+                path,
+                self.icon_size,
+                allow_expensive_previews=self.allow_expensive_previews,
+            )
+            if preview is not None and not preview.isNull():
+                batch.append((path, preview))
+            else:
+                batch.append((path, None))
+
+            if len(batch) >= 6:
+                self.signals.previews_ready.emit(self.token, batch)
+                batch = []
+        if batch:
+            self.signals.previews_ready.emit(self.token, batch)
+        self.signals.finished.emit(self.token)
+
+
 class ExplorerWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -59,6 +120,30 @@ class ExplorerWindow(QMainWindow):
         self._view_mode: str = "list"  # "list" or "thumbnail"
         self.thumbnail_provider: ThumbnailPreviewProvider | None = None
         self._network_poll_attempts = 0
+        self._thumbnail_render_token = 0
+        self._thumbnail_pending_items: list[tuple[QListWidgetItem, str]] = []
+        self._thumbnail_pending_index = 0
+        self._thumbnail_batch_size = 6
+        self._thumbnail_fast_mode = False
+        self._thumbnail_path_to_item: dict[str, QListWidgetItem] = {}
+        self._thumbnail_thread_pool = QThreadPool(self)
+        self._thumbnail_thread_pool.setMaxThreadCount(2)
+        self._thumbnail_worker_chunk_size = 12
+        self._thumbnail_workers: set[_ThumbnailPreviewWorker] = set()
+        self._thumbnail_ghost_icon: QIcon | None = None
+        self._thumbnail_ready_previews: deque[tuple[int, str, QImage]] = deque()
+        self._thumbnail_apply_batch_size = 4
+        self._thumbnail_apply_timer = QTimer(self)
+        self._thumbnail_apply_timer.setSingleShot(True)
+        self._thumbnail_apply_timer.timeout.connect(self._apply_ready_thumbnail_previews)
+        self._thumbnail_ghost_paths: set[str] = set()
+        self._thumbnail_preview_attempts: dict[str, int] = {}
+        self._thumbnail_inflight_paths: set[str] = set()
+        self._thumbnail_retry_batch_size = 3
+        self._thumbnail_retry_max_attempts = 6
+        self._thumbnail_retry_timer = QTimer(self)
+        self._thumbnail_retry_timer.setSingleShot(True)
+        self._thumbnail_retry_timer.timeout.connect(self._retry_ghost_thumbnails)
 
         self._setup_models()
         self._setup_views()
@@ -292,6 +377,7 @@ class ExplorerWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _on_thumbnail_double_clicked(self, item: QListWidgetItem) -> None:
+        self._defer_thumbnail_apply_after_interaction()
         path = item.data(Qt.UserRole)
         if not path:
             return
@@ -555,6 +641,8 @@ class ExplorerWindow(QMainWindow):
         paths = self.selected_paths()
         if not paths:
             return
+        if self._view_mode == "thumbnail":
+            self._defer_thumbnail_apply_after_interaction()
         path = paths[0]
         if os.path.isdir(path):
             self.navigate_to(path, record_history=True)
@@ -732,30 +820,353 @@ class ExplorerWindow(QMainWindow):
         return f"{size_bytes} B"
 
     def _populate_thumbnail_view(self, path: str) -> None:
+        self._thumbnail_render_token += 1
+        token = self._thumbnail_render_token
+        self._thumbnail_pending_items = []
+        self._thumbnail_pending_index = 0
+        self._thumbnail_path_to_item = {}
+        self._thumbnail_workers = set()
+        self._thumbnail_ready_previews = deque()
+        self._thumbnail_apply_timer.stop()
+        self._thumbnail_retry_timer.stop()
+        self._thumbnail_ghost_paths = set()
+        self._thumbnail_preview_attempts = {}
+        self._thumbnail_inflight_paths = set()
+
         self.thumbnail_view.clear()
+        self.thumbnail_view.setUpdatesEnabled(False)
         try:
-            for entry in os.listdir(path):
-                entry_path = os.path.join(path, entry)
-                if entry.startswith('.'):
-                    continue
+            icon_provider = self.fs_model.iconProvider()
+            ghost_icon = self._build_ghost_thumbnail_icon(self.thumbnail_view.iconSize())
+
+            entries = [entry for entry in os.scandir(path) if not entry.name.startswith('.')]
+            self._thumbnail_fast_mode = len(entries) > 120
+            preview_paths: list[str] = []
+
+            for entry in entries:
+                entry_path = entry.path
 
                 item = QListWidgetItem()
-                item.setText(entry)
+                item.setText(entry.name)
                 item.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                item.setIcon(ghost_icon)
+
+                item.setData(Qt.UserRole, entry_path)
+                self.thumbnail_view.addItem(item)
+                self._thumbnail_path_to_item[entry_path] = item
+                self._thumbnail_ghost_paths.add(entry_path)
+                self._thumbnail_preview_attempts[entry_path] = 0
+
+                if (
+                    self.thumbnail_provider is not None
+                    and self.thumbnail_provider.supports_background_preview(
+                        entry_path,
+                        allow_expensive_previews=not self._thumbnail_fast_mode,
+                    )
+                ):
+                    preview_paths.append(entry_path)
+                else:
+                    self._thumbnail_pending_items.append((item, entry_path))
+
+            preview_paths = self._order_thumbnail_paths_by_visibility(preview_paths)
+            if self._thumbnail_pending_items:
+                ordered_pending_paths = self._order_thumbnail_paths_by_visibility(
+                    [entry_path for _, entry_path in self._thumbnail_pending_items]
+                )
+                pending_by_path = {
+                    entry_path: (item, entry_path)
+                    for item, entry_path in self._thumbnail_pending_items
+                }
+                self._thumbnail_pending_items = [
+                    pending_by_path[entry_path]
+                    for entry_path in ordered_pending_paths
+                    if entry_path in pending_by_path
+                ]
+
+            # In very large folders, skip expensive non-image preview generation
+            # on initial rendering to keep switching responsive.
+            if self._thumbnail_pending_items:
+                QTimer.singleShot(0, lambda: self._process_thumbnail_batch(token))
+
+            if self.thumbnail_provider is not None and preview_paths:
+                self._start_thumbnail_preview_workers(token, preview_paths)
+
+            if self._thumbnail_ghost_paths and not self._thumbnail_retry_timer.isActive():
+                self._thumbnail_retry_timer.start(900)
+        except OSError:
+            pass
+        finally:
+            self.thumbnail_view.setUpdatesEnabled(True)
+
+    def _start_thumbnail_preview_workers(self, token: int, paths: list[str]) -> None:
+        if self.thumbnail_provider is None:
+            return
+
+        icon_size = self.thumbnail_view.iconSize()
+        allow_expensive = not self._thumbnail_fast_mode
+        for offset in range(0, len(paths), self._thumbnail_worker_chunk_size):
+            chunk = paths[offset : offset + self._thumbnail_worker_chunk_size]
+            for path in chunk:
+                self._thumbnail_inflight_paths.add(path)
+                self._thumbnail_preview_attempts[path] = self._thumbnail_preview_attempts.get(path, 0) + 1
+            worker = _ThumbnailPreviewWorker(
+                token=token,
+                provider=self.thumbnail_provider,
+                icon_size=icon_size,
+                paths=chunk,
+                allow_expensive_previews=allow_expensive,
+            )
+            worker.signals.previews_ready.connect(self._on_thumbnail_previews_ready)
+            worker.signals.finished.connect(
+                lambda finished_token, current_worker=worker: self._on_thumbnail_worker_finished(
+                    finished_token,
+                    current_worker,
+                )
+            )
+            self._thumbnail_workers.add(worker)
+            self._thumbnail_thread_pool.start(worker, -1)
+
+    def _on_thumbnail_previews_ready(self, token: int, previews_obj: object) -> None:
+        if token != self._thumbnail_render_token:
+            return
+        if self._view_mode != "thumbnail":
+            return
+        if not isinstance(previews_obj, list):
+            return
+
+        for preview_pair in previews_obj:
+            if not isinstance(preview_pair, tuple) or len(preview_pair) != 2:
+                continue
+            path, preview_obj = preview_pair
+            if not isinstance(path, str):
+                continue
+            self._thumbnail_inflight_paths.discard(path)
+
+            if preview_obj is None:
+                continue
+            if not isinstance(preview_obj, QImage) or preview_obj.isNull():
+                continue
+            self._thumbnail_ready_previews.append((token, path, preview_obj))
+
+        if not self._thumbnail_apply_timer.isActive():
+            self._thumbnail_apply_timer.start(8)
+
+    def _apply_ready_thumbnail_previews(self) -> None:
+        if self._view_mode != "thumbnail":
+            self._thumbnail_ready_previews = deque()
+            return
+        if self.thumbnail_provider is None:
+            self._thumbnail_ready_previews = deque()
+            return
+
+        applied = 0
+        self.thumbnail_view.setUpdatesEnabled(False)
+        try:
+            while self._thumbnail_ready_previews and applied < self._thumbnail_apply_batch_size:
+                token, path, preview = self._thumbnail_ready_previews.popleft()
+                if token != self._thumbnail_render_token:
+                    continue
+
+                item = self._thumbnail_path_to_item.get(path)
+                if item is None or item.listWidget() is not self.thumbnail_view:
+                    continue
+
+                item.setIcon(
+                    self.thumbnail_provider.icon_from_preview_image(
+                        preview,
+                        self.thumbnail_view.iconSize(),
+                    )
+                )
+                self._thumbnail_ghost_paths.discard(path)
+                self._thumbnail_preview_attempts.pop(path, None)
+                applied += 1
+        finally:
+            self.thumbnail_view.setUpdatesEnabled(True)
+
+        if self._thumbnail_ready_previews:
+            # Keep yielding to user input (double-click/open/scroll) while
+            # thumbnails continue rendering at lower priority.
+            self._thumbnail_apply_timer.start(12)
+            return
+
+        if self._thumbnail_ghost_paths and not self._thumbnail_retry_timer.isActive():
+            self._thumbnail_retry_timer.start(900)
+
+    def _on_thumbnail_worker_finished(
+        self,
+        token: int,
+        worker: _ThumbnailPreviewWorker,
+    ) -> None:
+        self._thumbnail_workers.discard(worker)
+        if token != self._thumbnail_render_token:
+            return
+        if self._thumbnail_ghost_paths and not self._thumbnail_retry_timer.isActive():
+            self._thumbnail_retry_timer.start(1200)
+
+    def _process_thumbnail_batch(self, token: int) -> None:
+        if token != self._thumbnail_render_token:
+            return
+        if self._view_mode != "thumbnail":
+            return
+        if self.thumbnail_provider is None:
+            return
+
+        start = self._thumbnail_pending_index
+        end = min(start + self._thumbnail_batch_size, len(self._thumbnail_pending_items))
+        icon_size = self.thumbnail_view.iconSize()
+
+        self.thumbnail_view.setUpdatesEnabled(False)
+        try:
+            for index in range(start, end):
+                item, entry_path = self._thumbnail_pending_items[index]
+                if item.listWidget() is not self.thumbnail_view:
+                    continue
                 if self.thumbnail_provider is not None:
                     item.setIcon(
                         self.thumbnail_provider.icon_for_path(
                             entry_path,
-                            self.thumbnail_view.iconSize(),
+                            icon_size,
+                            allow_expensive_previews=not self._thumbnail_fast_mode,
                         )
                     )
+                elif os.path.isdir(entry_path):
+                    item.setIcon(self.fs_model.iconProvider().icon(QFileIconProvider.Folder))
                 else:
                     item.setIcon(self.fs_model.iconProvider().icon(QFileIconProvider.File))
+                self._thumbnail_ghost_paths.discard(entry_path)
+                self._thumbnail_preview_attempts.pop(entry_path, None)
+                self._thumbnail_inflight_paths.discard(entry_path)
+        finally:
+            self.thumbnail_view.setUpdatesEnabled(True)
 
-                item.setData(Qt.UserRole, entry_path)
-                self.thumbnail_view.addItem(item)
-        except OSError:
-            pass
+        self._thumbnail_pending_index = end
+        if self._thumbnail_pending_index < len(self._thumbnail_pending_items):
+            QTimer.singleShot(10, lambda: self._process_thumbnail_batch(token))
+            return
+
+        self._thumbnail_pending_items = []
+        self._thumbnail_pending_index = 0
+
+    def _order_thumbnail_paths_by_visibility(self, paths: list[str]) -> list[str]:
+        if not paths:
+            return paths
+
+        viewport = self.thumbnail_view.viewport()
+        viewport_rect = viewport.rect()
+        top_left_item = self.thumbnail_view.itemAt(4, 4)
+        top_left_row = self.thumbnail_view.row(top_left_item) if top_left_item is not None else 0
+
+        prioritized: list[tuple[int, int, str]] = []
+        for path in paths:
+            item = self._thumbnail_path_to_item.get(path)
+            if item is None:
+                continue
+
+            rect = self.thumbnail_view.visualItemRect(item)
+            if rect.isValid() and rect.intersects(viewport_rect):
+                zone_rank = 0
+            elif rect.isValid() and rect.top() < viewport_rect.top():
+                zone_rank = 1
+            else:
+                zone_rank = 2
+
+            row = self.thumbnail_view.row(item)
+            distance = abs(row - top_left_row)
+            prioritized.append((zone_rank, distance, path))
+
+        if not prioritized:
+            return paths
+
+        prioritized.sort(key=lambda item: (item[0], item[1]))
+        ordered = [path for _, _, path in prioritized]
+
+        # Keep any unmapped paths at the end (defensive ordering fallback).
+        mapped = set(ordered)
+        for path in paths:
+            if path not in mapped:
+                ordered.append(path)
+        return ordered
+
+    def _retry_ghost_thumbnails(self) -> None:
+        if self._view_mode != "thumbnail":
+            return
+        if self.thumbnail_provider is None:
+            return
+        if not self._thumbnail_ghost_paths:
+            return
+
+        allow_expensive = not self._thumbnail_fast_mode
+        candidates: list[str] = []
+        for path in list(self._thumbnail_ghost_paths):
+            if path in self._thumbnail_inflight_paths:
+                continue
+            if path not in self._thumbnail_path_to_item:
+                continue
+            attempts = self._thumbnail_preview_attempts.get(path, 0)
+            if attempts >= self._thumbnail_retry_max_attempts:
+                item = self._thumbnail_path_to_item.get(path)
+                if item is not None:
+                    item.setIcon(self.fs_model.iconProvider().icon(QFileIconProvider.File))
+                self._thumbnail_ghost_paths.discard(path)
+                self._thumbnail_preview_attempts.pop(path, None)
+                continue
+            if not self.thumbnail_provider.supports_background_preview(
+                path,
+                allow_expensive_previews=allow_expensive,
+            ):
+                continue
+            candidates.append(path)
+            if len(candidates) >= self._thumbnail_retry_batch_size:
+                break
+
+        if candidates:
+            self._start_thumbnail_preview_workers(self._thumbnail_render_token, candidates)
+
+        if self._thumbnail_ghost_paths:
+            self._thumbnail_retry_timer.start(1400)
+
+    def _build_ghost_thumbnail_icon(self, icon_size: QSize) -> QIcon:
+        if self._thumbnail_ghost_icon is not None:
+            cached_size = self._thumbnail_ghost_icon.actualSize(icon_size)
+            if cached_size == icon_size:
+                return self._thumbnail_ghost_icon
+
+        canvas = QPixmap(icon_size)
+        canvas.fill(Qt.transparent)
+
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(180, 186, 197, 110))
+        margin = max(6, int(min(icon_size.width(), icon_size.height()) * 0.08))
+        painter.drawRoundedRect(
+            margin,
+            margin,
+            icon_size.width() - (margin * 2),
+            icon_size.height() - (margin * 2),
+            10,
+            10,
+        )
+        painter.end()
+
+        self._thumbnail_ghost_icon = QIcon(canvas)
+        return self._thumbnail_ghost_icon
+
+    def _defer_thumbnail_apply_after_interaction(self, delay_ms: int = 260) -> None:
+        if self._view_mode != "thumbnail":
+            return
+        self._thumbnail_apply_timer.stop()
+        token = self._thumbnail_render_token
+
+        def resume_apply() -> None:
+            if token != self._thumbnail_render_token:
+                return
+            if self._view_mode != "thumbnail":
+                return
+            if self._thumbnail_ready_previews and not self._thumbnail_apply_timer.isActive():
+                self._thumbnail_apply_timer.start(0)
+
+        QTimer.singleShot(delay_ms, resume_apply)
 
     def toggle_view_mode(self) -> None:
         if self._view_mode == "list":
