@@ -35,13 +35,11 @@ class ConfirmingDropTreeView(QTreeView):
             super().startDrag(supported_actions)
             return
 
-        mime_data = QMimeData()
-        urls = [QUrl.fromLocalFile(path) for path in source_paths]
-        mime_data.setUrls(urls)
+        mime_data = _build_file_drag_mime_data(source_paths)
 
         drag = QDrag(self)
         drag.setMimeData(mime_data)
-        drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.MoveAction)
+        drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
 
     def _resolve_drop_destination_path(self, event: QDropEvent) -> str:
         if hasattr(event, "position"):
@@ -93,10 +91,19 @@ class FileDragListWidget(QListWidget):
             super().startDrag(supported_actions)
             return
 
-        mime_data = QMimeData()
-        urls = [QUrl.fromLocalFile(path) for path in source_paths]
-        mime_data.setUrls(urls)
+        mime_data = _build_file_drag_mime_data(source_paths)
 
         drag = QDrag(self)
         drag.setMimeData(mime_data)
-        drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.MoveAction)
+        drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
+
+
+def _build_file_drag_mime_data(source_paths: list[str]) -> QMimeData:
+    mime_data = QMimeData()
+    urls = [QUrl.fromLocalFile(path) for path in source_paths]
+    mime_data.setUrls(urls)
+
+    # Some browser upload targets require the explicit uri-list payload.
+    uri_list = "\r\n".join(url.toString(QUrl.FullyEncoded) for url in urls) + "\r\n"
+    mime_data.setData("text/uri-list", uri_list.encode("utf-8"))
+    return mime_data
