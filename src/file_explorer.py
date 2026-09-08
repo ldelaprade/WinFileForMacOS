@@ -1468,6 +1468,7 @@ class ExplorerWindow(QMainWindow):
     def toggle_view_mode(self) -> None:
         if self._view_mode == "list":
             self._view_mode = "thumbnail"
+            self._populate_thumbnail_view(self.current_path())
             self.list_view.hide()
             self.thumbnail_view.show()
             self._ensure_thumbnail_width()
