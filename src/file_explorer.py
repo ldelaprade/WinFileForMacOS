@@ -4,6 +4,7 @@ import os
 from collections import deque
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse, urlunparse
 
 from PySide6.QtCore import (
