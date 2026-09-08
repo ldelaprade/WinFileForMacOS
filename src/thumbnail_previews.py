@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -69,6 +70,14 @@ class ThumbnailPreviewProvider:
             if cached_icon is not None:
                 return cached_icon
 
+        if self._is_app_bundle(path):
+            icon = self._thumbnail_fallback_icon(path, icon_size)
+            if cache_key is not None:
+                if len(self._thumbnail_icon_cache) > self.max_cache_size:
+                    self._thumbnail_icon_cache.clear()
+                self._thumbnail_icon_cache[cache_key] = icon
+            return icon
+
         if os.path.isdir(path):
             icon = self._thumbnail_folder_icon(path, icon_size)
             if cache_key is not None:
@@ -100,6 +109,8 @@ class ThumbnailPreviewProvider:
         path: str,
         allow_expensive_previews: bool = True,
     ) -> bool:
+        if self._is_app_bundle(path):
+            return False
         if os.path.isdir(path):
             return False
         suffix = Path(path).suffix.lower()
@@ -265,6 +276,12 @@ class ThumbnailPreviewProvider:
 
     def _thumbnail_folder_icon(self, path: str, icon_size: QSize) -> QIcon:
         return self._draw_generic_folder_icon(icon_size)
+
+    @staticmethod
+    def _is_app_bundle(path: str) -> bool:
+        if sys.platform != "darwin":
+            return False
+        return os.path.isdir(path) and path.lower().endswith(".app")
 
     def _load_scaled_image_preview(self, path: str, icon_size: QSize) -> QImage:
         reader = QImageReader(path)

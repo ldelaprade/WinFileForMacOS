@@ -78,7 +78,7 @@ Requirements before running:
 make release
 ```
 
-This runs: build → sign → dmg → notarize → staple. Outputs `dist/eXPlorer.dmg` ready to share.
+This runs: build → sign → dmg → notarize → staple. Outputs `dist/WinFileXP.dmg` ready to share.
 
 ## Cleanup
 
