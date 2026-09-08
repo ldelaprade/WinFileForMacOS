@@ -37,10 +37,11 @@ class XPIconProvider(QFileIconProvider):
 
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing, False)
-        painter.setPen(QPen(QColor("#9a7b2f"), 1))
-        painter.setBrush(QColor("#f6d66f"))
+        # Push toward a brighter yellow palette with a softer hairline edge.
+        painter.setPen(QPen(QColor("#c7a347"), 0))
+        painter.setBrush(QColor("#ffe689"))
         painter.drawRect(1, 5, 16, 10)
-        painter.setBrush(QColor("#f9e08e"))
+        painter.setBrush(QColor("#fff5cc"))
         painter.drawRect(2, 2, 7, 4)
         painter.end()
 

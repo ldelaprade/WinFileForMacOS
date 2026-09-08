@@ -360,13 +360,13 @@ class ThumbnailPreviewProvider:
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        # Back plate and tab (XP 2001 brighter yellow)
-        painter.setPen(QPen(QColor("#8b6a1f"), 2))
-        painter.setBrush(QColor("#f0c84f"))
+        # Brighter yellow palette and hairline strokes for a lighter look.
+        painter.setPen(QPen(QColor("#c29b3b"), 0))
+        painter.setBrush(QColor("#ffe079"))
         painter.drawRoundedRect(x, y, body_w, body_h, radius, radius)
 
-        painter.setPen(QPen(QColor("#8b6a1f"), 2))
-        painter.setBrush(QColor("#fbe3a0"))
+        painter.setPen(QPen(QColor("#c29b3b"), 0))
+        painter.setBrush(QColor("#fff3c6"))
         painter.drawRoundedRect(x + 5, y - tab_h + 2, tab_w, tab_h, radius * 0.7, radius * 0.7)
 
         # Front face for slight depth effect
@@ -377,9 +377,9 @@ class ThumbnailPreviewProvider:
         # painter.drawRoundedRect(x + 3, front_y, body_w - 6, front_h, radius, radius)
 
         # XP-like highlight and seam lines
-        painter.setPen(QPen(QColor("#fff0c3"), 2))
+        painter.setPen(QPen(QColor("#fff8dc"), 0))
         painter.drawLine(x + 8, y + 8, x + body_w - 10, y + 8)
-        painter.setPen(QPen(QColor("#be9130"), 1))
+        painter.setPen(QPen(QColor("#d4ad46"), 0))
         painter.drawLine(x + 8, front_y + 2, x + body_w - 9, front_y + 2)
         painter.drawLine(x + 8, front_y + front_h // 2, x + body_w - 9, front_y + front_h // 2)
 
