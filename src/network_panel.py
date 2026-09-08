@@ -95,11 +95,46 @@ def unmount_share(mount_path: str) -> bool:
 
 
 def resolve_smb_mount_paths(smb_url: str) -> tuple[str | None, str | None]:
-    """Parse smb://host/share[/sub/path] → (mount_root, target_path).
+    """Parse network share input into (mount_root, target_path).
 
-    Returns (None, None) when the URL is not a valid SMB URL.
+    macOS/Linux: supports smb://host/share[/sub/path].
+    Windows: supports UNC paths (\\\\host\\share[\\sub\\path]) and smb:// URLs.
+
+    Returns (None, None) for invalid input.
     """
-    parsed = urlparse(smb_url)
+    raw = smb_url.strip()
+    if not raw:
+        return None, None
+
+    # On Windows, access SMB shares via UNC paths.
+    if os.name == "nt":
+        if raw.startswith("\\\\"):
+            parts = [segment for segment in raw.split("\\") if segment]
+            if len(parts) < 2:
+                return None, None
+            host = parts[0]
+            share_name = parts[1]
+            mount_root = f"\\\\{host}\\{share_name}"
+            if len(parts) == 2:
+                return mount_root, mount_root
+            sub_path = "\\".join(parts[2:])
+            return mount_root, f"{mount_root}\\{sub_path}"
+
+        parsed = urlparse(raw)
+        if parsed.scheme.lower() != "smb" or not parsed.netloc:
+            return None, None
+        path_parts = [unquote(p) for p in parsed.path.split("/") if p]
+        if not path_parts:
+            return None, None
+        host = parsed.hostname or parsed.netloc
+        share_name = path_parts[0]
+        mount_root = f"\\\\{host}\\{share_name}"
+        if len(path_parts) == 1:
+            return mount_root, mount_root
+        sub_path = "\\".join(path_parts[1:])
+        return mount_root, f"{mount_root}\\{sub_path}"
+
+    parsed = urlparse(raw)
     if parsed.scheme.lower() != "smb" or not parsed.netloc:
         return None, None
     path_parts = [p for p in parsed.path.split("/") if p]
