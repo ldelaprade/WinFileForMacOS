@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 from collections import deque
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
@@ -526,6 +527,10 @@ class ExplorerWindow(QMainWindow):
             return str(Path.home())
         return self.fs_model.filePath(root_index)
 
+    @staticmethod
+    def _is_windows_unc_path(path: str) -> bool:
+        return os.name == "nt" and path.startswith("\\\\")
+
     def navigate_to(self, path: str, record_history: bool = False) -> None:
         normalized = os.path.abspath(os.path.expanduser(path))
         if self._is_app_bundle(normalized):
@@ -536,11 +541,12 @@ class ExplorerWindow(QMainWindow):
             return
 
         self.fs_model.setRootPath(normalized)
-        self.dir_model.setRootPath(normalized)
         root_index = self.fs_model.index(normalized)
-        tree_index = self.dir_model.index(normalized)
-        self.tree_view.setCurrentIndex(tree_index)
-        self.tree_view.scrollTo(tree_index)
+        if not self._is_windows_unc_path(normalized):
+            self.dir_model.setRootPath(normalized)
+            tree_index = self.dir_model.index(normalized)
+            self.tree_view.setCurrentIndex(tree_index)
+            self.tree_view.scrollTo(tree_index)
         self.list_view.setRootIndex(root_index)
         self.address_bar.setText(normalized)
 
@@ -565,7 +571,7 @@ class ExplorerWindow(QMainWindow):
 
     def _on_address_enter(self) -> None:
         entered = self.address_bar.text().strip()
-        if entered.lower().startswith("smb://"):
+        if entered.lower().startswith("smb://") or (os.name == "nt" and entered.startswith("\\\\")):
             self.connect_network_share(entered)
             return
         self.navigate_to(entered, record_history=True)
@@ -573,11 +579,16 @@ class ExplorerWindow(QMainWindow):
     def connect_network_share(self, share_url: str | None = None) -> None:
         target_url = (share_url or "").strip()
         if not target_url:
+            prompt = "SMB URL (example: smb://server/share):"
+            default_text = "smb://"
+            if os.name == "nt":
+                prompt = "Network share path (example: \\\\server\\share):"
+                default_text = "\\\\"
             target_url, ok = QInputDialog.getText(
                 self,
                 "Connect Network Share",
-                "SMB URL (example: smb://server/share):",
-                text="smb://",
+                prompt,
+                text=default_text,
             )
             if not ok:
                 return
@@ -588,7 +599,11 @@ class ExplorerWindow(QMainWindow):
 
         mount_root, target_path = resolve_smb_mount_paths(target_url)
         if mount_root is None:
-            QMessageBox.warning(self, "Connect Network Share", "Invalid SMB URL.")
+            QMessageBox.warning(
+                self,
+                "Connect Network Share",
+                "Invalid network share path. Use smb://server/share or \\\\server\\share.",
+            )
             return
 
         if os.path.isdir(target_path):
@@ -599,6 +614,10 @@ class ExplorerWindow(QMainWindow):
         if os.path.isdir(mount_root):
             self._refresh_network_panel_with_retries()
             self.navigate_to(mount_root, record_history=True)
+            return
+
+        if os.name == "nt":
+            self._connect_windows_unc_share(mount_root, target_path)
             return
 
         if not mount_smb_share(target_url):
@@ -617,12 +636,36 @@ class ExplorerWindow(QMainWindow):
         self._poll_for_mounted_share(mount_root, target_path)
 
     def _edit_network_connection_parameters(self, mount_path: str, source_url: str) -> None:
+        if os.name == "nt" and source_url.startswith("\\\\"):
+            edited_path, ok = QInputDialog.getText(
+                self,
+                "Edit Connection Parameters",
+                "Network share path (example: \\\\server\\share):",
+                text=source_url,
+            )
+            if not ok:
+                return
+            edited_path = edited_path.strip()
+            mount_root, target_path = resolve_smb_mount_paths(edited_path)
+            if mount_root is None or target_path is None:
+                QMessageBox.warning(
+                    self,
+                    "Edit Connection Parameters",
+                    "Invalid UNC path. Use \\\\server\\share or \\\\server\\share\\folder.",
+                )
+                return
+
+            if os.path.isdir(mount_path):
+                unmount_share(mount_path)
+            self.connect_network_share(edited_path)
+            return
+
         parsed = urlparse(source_url)
         if parsed.scheme.lower() != "smb":
             QMessageBox.information(
                 self,
                 "Edit Connection Parameters",
-                "Connection parameter editing is currently supported for SMB shares only.",
+                "Connection parameter editing is currently supported for SMB URLs and Windows UNC paths.",
             )
             return
 
@@ -696,6 +739,135 @@ class ExplorerWindow(QMainWindow):
             return
 
         QTimer.singleShot(1000, lambda: self._poll_for_mounted_share(mount_root, target_path))
+
+    @staticmethod
+    def _split_unc_mount_root(path: str) -> tuple[str | None, str | None]:
+        if not path.startswith("\\\\"):
+            return None, None
+        parts = [segment for segment in path.split("\\") if segment]
+        if len(parts) < 2:
+            return None, None
+        return parts[0], parts[1]
+
+    def _prompt_windows_credentials(self) -> tuple[str, str, bool] | None:
+        username, ok = QInputDialog.getText(
+            self,
+            "Connect Network Share",
+            "User name (DOMAIN\\user, server\\user, or user):",
+            text="",
+        )
+        if not ok:
+            return None
+        username = username.strip()
+
+        password, ok = QInputDialog.getText(
+            self,
+            "Connect Network Share",
+            "Password (optional):",
+            QLineEdit.Password,
+            "",
+        )
+        if not ok:
+            return None
+
+        save_credentials = (
+            QMessageBox.question(
+                self,
+                "Save Credentials",
+                "Save credentials in Windows Credential Manager?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            == QMessageBox.Yes
+        )
+        return username, password, save_credentials
+
+    def _connect_windows_unc_share(self, mount_root: str, target_path: str) -> None:
+        creds = self._prompt_windows_credentials()
+        if creds is None:
+            return
+        username, password, save_credentials = creds
+
+        host, _share = self._split_unc_mount_root(mount_root)
+        if save_credentials and username and host:
+            cmdkey_args = [
+                "cmdkey",
+                f"/add:{host}",
+                f"/user:{username}",
+                f"/pass:{password}",
+            ]
+            try:
+                cmdkey_result = subprocess.run(
+                    cmdkey_args,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except OSError as error:
+                QMessageBox.warning(
+                    self,
+                    "Connect Network Share",
+                    f"Could not save credentials: {error}",
+                )
+                return
+            if cmdkey_result.returncode != 0:
+                detail = (cmdkey_result.stderr or cmdkey_result.stdout).strip() or "Unknown error"
+                QMessageBox.warning(
+                    self,
+                    "Connect Network Share",
+                    f"Could not save credentials in Credential Manager:\n{detail}",
+                )
+                return
+
+        net_use_args = ["net", "use", mount_root]
+        if username:
+            net_use_args.append(password)
+            net_use_args.append(f"/user:{username}")
+        elif password:
+            net_use_args.append(password)
+        net_use_args.append("/persistent:no")
+
+        try:
+            net_use_result = subprocess.run(
+                net_use_args,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except OSError as error:
+            QMessageBox.warning(
+                self,
+                "Connect Network Share",
+                f"Could not run net use: {error}",
+            )
+            return
+
+        if net_use_result.returncode != 0:
+            detail = (net_use_result.stderr or net_use_result.stdout).strip() or "Unknown error"
+            QMessageBox.warning(
+                self,
+                "Connect Network Share",
+                f"Windows could not connect to the share:\n{detail}",
+            )
+            return
+
+        if os.path.isdir(target_path):
+            self._refresh_network_panel_with_retries()
+            self.navigate_to(target_path, record_history=True)
+            return
+
+        if os.path.isdir(mount_root):
+            self._refresh_network_panel_with_retries()
+            self.navigate_to(mount_root, record_history=True)
+            return
+
+        QMessageBox.warning(
+            self,
+            "Connect Network Share",
+            "Share connected but path is still not accessible. Verify share path and permissions.",
+        )
 
     def _refresh_network_panel_with_retries(self, retries: int = 4, delay_ms: int = 500) -> None:
         """Refresh network panel multiple times to absorb post-mount timing lag."""
@@ -896,10 +1068,11 @@ class ExplorerWindow(QMainWindow):
     def refresh(self) -> None:
         current = self.current_path()
         index = self.fs_model.index(current)
-        tree_index = self.dir_model.index(current)
         self.list_view.setRootIndex(index)
-        self.tree_view.setCurrentIndex(tree_index)
-        self.tree_view.scrollTo(tree_index)
+        if not self._is_windows_unc_path(current):
+            tree_index = self.dir_model.index(current)
+            self.tree_view.setCurrentIndex(tree_index)
+            self.tree_view.scrollTo(tree_index)
         if self._view_mode == "thumbnail":
             self._populate_thumbnail_view(current)
         self._update_status()

@@ -36,7 +36,7 @@ python -m src.main
 - Deletion is permanent in this version (no trash integration yet).
 - Drag-and-drop move now asks for confirmation with item count and destination preview.
 - Delete confirmation now shows selected item names/count.
-- To browse a network share: right-click the **Network** node in the left panel → *Connect Network Share…* and enter an SMB URL (e.g. `smb://server/share` or `smb://server/share/folder`). Alternatively, type the URL directly in the address bar and press Enter. macOS will prompt for credentials if needed, then the share appears under *Network* and WinFileXP navigates into it automatically.
+- To browse a network share: right-click the **Network** node in the left panel → *Connect Network Share…* and enter a network path. Use SMB URL on macOS/Linux (e.g. `smb://server/share` or `smb://server/share/folder`) and UNC path on Windows (e.g. `\\server\share` or `\\server\share\folder`). Alternatively, type it directly in the address bar and press Enter. On macOS, login prompts may appear and the share then appears under *Network*.
 - Already-mounted shares (Windows/Samba/NFS/AFP) appear automatically under *Network* when the app starts.
 - Right-click a mounted share under *Network* to **Browse**, **Disconnect**, or connect another share.
 
