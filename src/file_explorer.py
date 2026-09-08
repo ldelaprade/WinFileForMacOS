@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -109,10 +112,16 @@ class _ThumbnailPreviewWorker(QRunnable):
 
 
 class ExplorerWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        open_new_window_callback: Callable[[str | None], None] | None = None,
+        initial_path: str | None = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("WinFile XP for Mac OS")
         self.resize(1200, 760)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._open_new_window_callback = open_new_window_callback
 
         self.navigation_history = NavigationHistory()
         self._clipboard_paths: list[str] = []
@@ -145,13 +154,23 @@ class ExplorerWindow(QMainWindow):
         self._thumbnail_retry_timer.setSingleShot(True)
         self._thumbnail_retry_timer.timeout.connect(self._retry_ghost_thumbnails)
 
+        self.new_window_action = QAction("New Window", self)
+        self.new_window_action.setShortcut(QKeySequence.StandardKey.New)
+        self.new_window_action.triggered.connect(self.open_new_window)
+
+        self.close_window_action = QAction("Close Window", self)
+        self.close_window_action.setShortcut(QKeySequence.StandardKey.Close)
+        self.close_window_action.triggered.connect(self.close)
+
         self._setup_models()
         self._setup_views()
+        self._setup_menus()
         self._setup_toolbar()
         self._setup_statusbar()
         self._setup_shortcuts()
 
-        self.navigate_to(str(Path.home()), record_history=True)
+        start_path = initial_path if initial_path and os.path.isdir(initial_path) else str(Path.home())
+        self.navigate_to(start_path, record_history=True)
 
     def _setup_models(self) -> None:
         icon_provider = XPIconProvider()
@@ -253,6 +272,9 @@ class ExplorerWindow(QMainWindow):
         self.thumbnail_view.setAcceptDrops(True)
         self.thumbnail_view.setDropIndicatorShown(True)
         self.thumbnail_view.setDragDropMode(QListWidget.DragDrop)
+        self.thumbnail_view.setDefaultDropAction(Qt.MoveAction)
+        self.thumbnail_view.set_drop_target_path_callback(self.current_path)
+        self.thumbnail_view.set_file_drop_callback(self._handle_thumbnail_drop)
         self.thumbnail_view.doubleClicked.connect(self._on_thumbnail_double_clicked)
         self.thumbnail_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.thumbnail_view.customContextMenuRequested.connect(self._show_context_menu)
@@ -273,6 +295,9 @@ class ExplorerWindow(QMainWindow):
         toolbar = QToolBar("Navigation", self)
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
+
+        toolbar.addAction(self.new_window_action)
+        toolbar.addSeparator()
 
         self.back_action = QAction("Back", self)
         self.back_action.triggered.connect(self.go_back)
@@ -307,6 +332,12 @@ class ExplorerWindow(QMainWindow):
         self.view_toggle_action.setCheckable(True)
         self.view_toggle_action.triggered.connect(self.toggle_view_mode)
         toolbar.addAction(self.view_toggle_action)
+
+    def _setup_menus(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction(self.new_window_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.close_window_action)
 
     def _setup_statusbar(self) -> None:
         self.status = QStatusBar(self)
@@ -365,12 +396,18 @@ class ExplorerWindow(QMainWindow):
         if not index.isValid():
             return
         path = self.dir_model.filePath(index)
+        if self._is_app_bundle(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            return
         self.navigate_to(path, record_history=True)
 
     def _on_list_double_clicked(self, index: QModelIndex) -> None:
         if not index.isValid():
             return
         path = self.fs_model.filePath(index)
+        if self._is_app_bundle(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            return
         if os.path.isdir(path):
             self.navigate_to(path, record_history=True)
             return
@@ -380,6 +417,9 @@ class ExplorerWindow(QMainWindow):
         self._defer_thumbnail_apply_after_interaction()
         path = item.data(Qt.UserRole)
         if not path:
+            return
+        if self._is_app_bundle(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
             return
         if os.path.isdir(path):
             self.navigate_to(path, record_history=True)
@@ -397,8 +437,74 @@ class ExplorerWindow(QMainWindow):
         )
         return dialog.exec() == QDialog.Accepted
 
+    def _handle_thumbnail_drop(
+        self,
+        destination_path: str,
+        source_paths: list[str],
+        is_move_drop: bool,
+    ) -> bool:
+        if not source_paths:
+            return False
+
+        target_dir = destination_path.strip() if destination_path else self.current_path()
+        if not target_dir or not os.path.isdir(target_dir):
+            return False
+
+        if is_move_drop and not self._confirm_drag_move(target_dir, source_paths):
+            return False
+
+        failures: list[str] = []
+        moved_count = 0
+        copied_count = 0
+        destination = Path(target_dir)
+
+        for source_path_str in source_paths:
+            source_path = Path(source_path_str)
+            if not source_path.exists():
+                failures.append(f"{source_path}: not found")
+                continue
+
+            if source_path.parent == destination:
+                continue
+
+            target_path = destination / source_path.name
+            if target_path.exists():
+                failures.append(f"{target_path}: destination already exists")
+                continue
+
+            try:
+                if is_move_drop:
+                    shutil.move(str(source_path), str(target_path))
+                    moved_count += 1
+                else:
+                    if source_path.is_dir():
+                        shutil.copytree(source_path, target_path)
+                    else:
+                        shutil.copy2(source_path, target_path)
+                    copied_count += 1
+            except OSError as error:
+                failures.append(f"{source_path} -> {target_path}: {error}")
+
+        self.refresh()
+
+        if failures:
+            QMessageBox.warning(
+                self,
+                "Drop",
+                "Some items could not be transferred:\n" + "\n".join(failures),
+            )
+
+        if moved_count > 0:
+            self.status.showMessage(f"Moved {moved_count} item(s)", 2500)
+        elif copied_count > 0:
+            self.status.showMessage(f"Copied {copied_count} item(s)", 2500)
+
+        return moved_count > 0 or copied_count > 0 or not failures
+
     def _show_context_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)
+        menu.addAction(self.new_window_action)
+        menu.addSeparator()
         menu.addAction("Open", self.open_selected)
         menu.addAction("Edit", self.edit_selected)
         menu.addAction("Rename", self.rename_selected)
@@ -422,6 +528,9 @@ class ExplorerWindow(QMainWindow):
 
     def navigate_to(self, path: str, record_history: bool = False) -> None:
         normalized = os.path.abspath(os.path.expanduser(path))
+        if self._is_app_bundle(normalized):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(normalized))
+            return
         if not os.path.isdir(normalized):
             QMessageBox.warning(self, "Invalid path", f"Folder not found:\n{normalized}")
             return
@@ -602,6 +711,11 @@ class ExplorerWindow(QMainWindow):
         self.address_bar.setFocus()
         self.address_bar.selectAll()
 
+    def open_new_window(self) -> None:
+        if self._open_new_window_callback is None:
+            return
+        self._open_new_window_callback(self.current_path())
+
     def go_back(self) -> None:
         target = self.navigation_history.go_back()
         if target is None:
@@ -644,10 +758,19 @@ class ExplorerWindow(QMainWindow):
         if self._view_mode == "thumbnail":
             self._defer_thumbnail_apply_after_interaction()
         path = paths[0]
+        if self._is_app_bundle(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            return
         if os.path.isdir(path):
             self.navigate_to(path, record_history=True)
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    @staticmethod
+    def _is_app_bundle(path: str) -> bool:
+        if sys.platform != "darwin":
+            return False
+        return os.path.isdir(path) and path.lower().endswith(".app")
 
     def edit_selected(self) -> None:
         paths = self.selected_paths()
@@ -1207,6 +1330,29 @@ def run() -> None:
     app.setApplicationName("WinFile")
     app.setStyle("Fusion")
     app.setStyleSheet(xp_stylesheet())
-    window = ExplorerWindow()
-    window.show()
+
+    class _WindowManager(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self._windows: list[ExplorerWindow] = []
+
+        def create_window(self, start_path: str | None = None) -> ExplorerWindow:
+            window = ExplorerWindow(
+                open_new_window_callback=self.create_window,
+                initial_path=start_path,
+            )
+            self._windows.append(window)
+            window.destroyed.connect(lambda *_: self._on_window_destroyed(window))
+
+            window.show()
+            window.raise_()
+            window.activateWindow()
+            return window
+
+        def _on_window_destroyed(self, window: ExplorerWindow) -> None:
+            if window in self._windows:
+                self._windows.remove(window)
+
+    window_manager = _WindowManager()
+    window_manager.create_window()
     app.exec()

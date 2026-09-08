@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtCore import QFileInfo, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QFileIconProvider
@@ -8,12 +10,17 @@ from PySide6.QtWidgets import QFileIconProvider
 class XPIconProvider(QFileIconProvider):
     def __init__(self) -> None:
         super().__init__()
+        self._native_icon_provider = QFileIconProvider()
         self._folder_icon = self._build_folder_icon()
         self._file_icon = self._build_file_icon()
 
     def icon(self, info_or_type):  # type: ignore[override]
         if isinstance(info_or_type, QFileInfo):
             if info_or_type.isDir():
+                if sys.platform == "darwin" and info_or_type.filePath().lower().endswith(".app"):
+                    native_icon = self._native_icon_provider.icon(info_or_type)
+                    if not native_icon.isNull():
+                        return native_icon
                 return self._folder_icon
             return self._file_icon
 

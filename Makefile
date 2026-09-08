@@ -5,6 +5,7 @@ run:
 APP_NAME      := WinFileXP
 APP_BUNDLE    := dist/$(APP_NAME).app
 DMG_NAME      := dist/$(APP_NAME).dmg
+DMG_STAGE     := dist/.dmg-stage
 ENTRY         := src/main.py
 PYTHON        ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PIP           := $(PYTHON) -m pip
@@ -86,13 +87,26 @@ sign:
 	         "$(APP_BUNDLE)"
 
 dmg:
-	create-dmg \
-	  --volname "$(APP_NAME)" \
-	  --window-size 540 380 \
-	  --icon-size 96 \
-	  --app-drop-link 380 150 \
-	  "$(DMG_NAME)" \
-	  "$(APP_BUNDLE)"
+	@test -d "$(APP_BUNDLE)" || (echo "Missing app bundle: $(APP_BUNDLE). Run 'make build' first." && exit 1)
+	@rm -rf "$(DMG_STAGE)"
+	@mkdir -p "$(DMG_STAGE)"
+	@cp -R "$(APP_BUNDLE)" "$(DMG_STAGE)/"
+	@ln -s /Applications "$(DMG_STAGE)/Applications"
+	@rm -f "$(DMG_NAME)"
+	@if command -v create-dmg >/dev/null 2>&1; then \
+		create-dmg \
+		  --volname "$(APP_NAME)" \
+		  --window-size 540 380 \
+		  --icon-size 96 \
+		  --app-drop-link 380 150 \
+		  "$(DMG_NAME)" \
+		  "$(DMG_STAGE)"; \
+	else \
+		echo "create-dmg not found; using hdiutil fallback."; \
+		hdiutil create -volname "$(APP_NAME)" -srcfolder "$(DMG_STAGE)" -ov -format UDZO "$(DMG_NAME)"; \
+	fi
+	@rm -rf "$(DMG_STAGE)"
+	@echo "Built DMG: $(DMG_NAME)"
 
 notarize:
 	xcrun notarytool submit "$(DMG_NAME)" \
