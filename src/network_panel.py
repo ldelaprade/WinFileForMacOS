@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from urllib.parse import unquote, urlparse
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWidgetItem, QWidget, QFileIconProvider
 
 from .ui_theme import XPIconProvider
 
 
+_WINDOWS_KNOWN_SHARES_KEY = "network/known_windows_shares"
+
+
 def get_mounted_network_shares() -> list[tuple[str, str, str]]:
     """Return (display_name, mount_path, source_url) for each mounted network share."""
+    if os.name == "nt":
+        return _get_windows_network_shares()
+
     try:
         result = subprocess.run(
             ["mount"],
@@ -36,6 +43,90 @@ def get_mounted_network_shares() -> list[tuple[str, str, str]]:
         display = mount_path.rsplit("/", 1)[-1] or mount_path
         source_url = _mounted_source_to_url(source.strip(), lower)
         shares.append((display, mount_path, source_url))
+    return shares
+
+
+def normalize_network_share_input(raw_input: str) -> str:
+    """Normalize SMB/UNC text input, especially permissive Windows SMB variants."""
+    raw = raw_input.strip()
+    if not raw:
+        return raw
+
+    if os.name != "nt":
+        return raw
+
+    # Accept user input like smb:\\host\share or smb://host/share by converting to UNC.
+    if raw.lower().startswith("smb:"):
+        rest = raw[4:].lstrip("/\\")
+        if not rest:
+            return raw
+        parts = [segment for segment in re.split(r"[\\/]+", rest) if segment]
+        if len(parts) >= 2:
+            host = parts[0]
+            share_name = parts[1]
+            unc = f"\\\\{host}\\{share_name}"
+            if len(parts) > 2:
+                unc = f"{unc}\\{'\\'.join(parts[2:])}"
+            return unc
+        return raw
+
+    if raw.startswith("\\\\"):
+        parts = [segment for segment in re.split(r"[\\/]+", raw) if segment]
+        if len(parts) >= 2:
+            unc = f"\\\\{parts[0]}\\{parts[1]}"
+            if len(parts) > 2:
+                unc = f"{unc}\\{'\\'.join(parts[2:])}"
+            return unc
+    return raw
+
+
+def _get_windows_network_shares() -> list[tuple[str, str, str]]:
+    """Return active Windows network shares from `net use` output."""
+    try:
+        result = subprocess.run(
+            ["net", "use"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except OSError:
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    shares: list[tuple[str, str, str]] = []
+    seen_paths: set[str] = set()
+
+    # Example lines include mapped and unmapped entries, e.g.:
+    # OK           Z:        \\server\share          Microsoft Windows Network
+    # OK                     \\server\share          Microsoft Windows Network
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("-"):
+            continue
+        if "\\\\" not in line:
+            continue
+        if "command completed" in line.lower():
+            continue
+
+        match = re.search(r"(\\\\[^\s]+)", line)
+        if match is None:
+            continue
+        remote_path = match.group(1).rstrip("\\")
+        if not remote_path:
+            continue
+
+        normalized = remote_path.lower()
+        if normalized in seen_paths:
+            continue
+        seen_paths.add(normalized)
+
+        parts = [segment for segment in remote_path.split("\\") if segment]
+        display = parts[1] if len(parts) >= 2 else remote_path
+        shares.append((display, remote_path, remote_path))
+
     return shares
 
 
@@ -82,6 +173,19 @@ def mount_smb_share(smb_url: str) -> bool:
 
 def unmount_share(mount_path: str) -> bool:
     """Unmount a network share by its local mount path."""
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["net", "use", mount_path, "/delete", "/y"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            return result.returncode == 0
+        except OSError:
+            return False
+
     try:
         subprocess.run(
             ["diskutil", "unmount", mount_path],
@@ -102,7 +206,7 @@ def resolve_smb_mount_paths(smb_url: str) -> tuple[str | None, str | None]:
 
     Returns (None, None) for invalid input.
     """
-    raw = smb_url.strip()
+    raw = normalize_network_share_input(smb_url)
     if not raw:
         return None, None
 
@@ -170,6 +274,8 @@ class NetworkPanel(QTreeWidget):
     ) -> None:
         super().__init__(parent)
         self._connect_callback = connect_callback
+        self._settings = QSettings("WinFileXP", "WinFileXP")
+        self._known_windows_shares = self._load_known_windows_shares()
         style = QApplication.style()
         self._network_root_icon = style.standardIcon(QStyle.SP_DriveNetIcon)
         icon_provider = XPIconProvider()
@@ -187,7 +293,16 @@ class NetworkPanel(QTreeWidget):
     def refresh_shares(self) -> None:
         """Re-scan mounted network shares and repopulate the tree."""
         self.clear()
-        for display_name, mount_path, source_url in get_mounted_network_shares():
+        shares = list(get_mounted_network_shares())
+        if os.name == "nt":
+            shares.extend(self._known_windows_share_entries())
+
+        seen_paths: set[str] = set()
+        for display_name, mount_path, source_url in shares:
+            normalized = mount_path.lower()
+            if normalized in seen_paths:
+                continue
+            seen_paths.add(normalized)
             item = QTreeWidgetItem(self, [f"{display_name} ({source_url})"])
             item.setData(0, self._PATH_ROLE, mount_path)
             item.setData(0, self._IS_SHARE_ROLE, True)
@@ -248,8 +363,79 @@ class NetworkPanel(QTreeWidget):
     def _on_disconnect(self, item: QTreeWidgetItem) -> None:
         path = item.data(0, self._PATH_ROLE)
         if path:
+            self.unregister_known_windows_share(path)
             unmount_share(path)
         self.refresh_shares()
+
+    def register_known_windows_share(self, mount_path: str) -> None:
+        if os.name != "nt":
+            return
+        normalized = normalize_network_share_input(mount_path)
+        if not normalized.startswith("\\\\"):
+            return
+        key = normalized.lower()
+        if key in {entry.lower() for entry in self._known_windows_shares}:
+            return
+        self._known_windows_shares.append(normalized)
+        self._save_known_windows_shares()
+
+    def unregister_known_windows_share(self, mount_path: str) -> None:
+        if os.name != "nt":
+            return
+        normalized = normalize_network_share_input(mount_path).lower()
+        before = len(self._known_windows_shares)
+        self._known_windows_shares = [
+            entry for entry in self._known_windows_shares if entry.lower() != normalized
+        ]
+        if len(self._known_windows_shares) != before:
+            self._save_known_windows_shares()
+
+    def _known_windows_share_entries(self) -> list[tuple[str, str, str]]:
+        entries: list[tuple[str, str, str]] = []
+        reachable: list[str] = []
+        for known_share in self._known_windows_shares:
+            normalized = normalize_network_share_input(known_share)
+            if not normalized.startswith("\\\\"):
+                continue
+            # Keep shortcuts useful by showing currently reachable shares.
+            if not os.path.isdir(normalized):
+                continue
+            parts = [segment for segment in normalized.split("\\") if segment]
+            display = parts[1] if len(parts) >= 2 else normalized
+            entries.append((display, normalized, normalized))
+            reachable.append(normalized)
+        if reachable != self._known_windows_shares:
+            self._known_windows_shares = reachable
+            self._save_known_windows_shares()
+        return entries
+
+    def _load_known_windows_shares(self) -> list[str]:
+        if os.name != "nt":
+            return []
+        saved = self._settings.value(_WINDOWS_KNOWN_SHARES_KEY, [])
+        if isinstance(saved, str):
+            saved = [saved]
+        if not isinstance(saved, list):
+            return []
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in saved:
+            if not isinstance(value, str):
+                continue
+            normalized = normalize_network_share_input(value)
+            if not normalized.startswith("\\\\"):
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            cleaned.append(normalized)
+        return cleaned
+
+    def _save_known_windows_shares(self) -> None:
+        if os.name != "nt":
+            return
+        self._settings.setValue(_WINDOWS_KNOWN_SHARES_KEY, self._known_windows_shares)
 
     @staticmethod
     def _has_subdirectories(path: str) -> bool:

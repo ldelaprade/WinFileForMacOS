@@ -63,7 +63,13 @@ from .dialogs import (
     build_move_confirmation_message,
 )
 from .dragdrop_views import ConfirmingDropTreeView, FileDragListWidget
-from .network_panel import NetworkPanel, mount_smb_share, resolve_smb_mount_paths, unmount_share
+from .network_panel import (
+    NetworkPanel,
+    mount_smb_share,
+    normalize_network_share_input,
+    resolve_smb_mount_paths,
+    unmount_share,
+)
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
 from .thumbnail_previews import ThumbnailPreviewProvider
@@ -572,13 +578,14 @@ class ExplorerWindow(QMainWindow):
 
     def _on_address_enter(self) -> None:
         entered = self.address_bar.text().strip()
-        if entered.lower().startswith("smb://") or (os.name == "nt" and entered.startswith("\\\\")):
+        mount_root, _target_path = resolve_smb_mount_paths(entered)
+        if mount_root is not None:
             self.connect_network_share(entered)
             return
         self.navigate_to(entered, record_history=True)
 
     def connect_network_share(self, share_url: str | None = None) -> None:
-        target_url = (share_url or "").strip()
+        target_url = normalize_network_share_input((share_url or "").strip())
         if not target_url:
             prompt = "SMB URL (example: smb://server/share):"
             default_text = "smb://"
@@ -593,7 +600,7 @@ class ExplorerWindow(QMainWindow):
             )
             if not ok:
                 return
-            target_url = target_url.strip()
+            target_url = normalize_network_share_input(target_url.strip())
 
         if not target_url:
             return
@@ -608,11 +615,13 @@ class ExplorerWindow(QMainWindow):
             return
 
         if os.path.isdir(target_path):
+            self.network_panel.register_known_windows_share(mount_root)
             self._refresh_network_panel_with_retries()
             self.navigate_to(target_path, record_history=True)
             return
 
         if os.path.isdir(mount_root):
+            self.network_panel.register_known_windows_share(mount_root)
             self._refresh_network_panel_with_retries()
             self.navigate_to(mount_root, record_history=True)
             return
@@ -720,11 +729,13 @@ class ExplorerWindow(QMainWindow):
 
     def _poll_for_mounted_share(self, mount_root: str, target_path: str) -> None:
         if os.path.isdir(target_path):
+            self.network_panel.register_known_windows_share(mount_root)
             self._refresh_network_panel_with_retries()
             self.navigate_to(target_path, record_history=True)
             return
 
         if os.path.isdir(mount_root):
+            self.network_panel.register_known_windows_share(mount_root)
             self._refresh_network_panel_with_retries()
             self.navigate_to(mount_root, record_history=True)
             return
