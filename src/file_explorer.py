@@ -10,11 +10,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse, urlunparse
 
+import math
 from PySide6.QtCore import (
     QDir,
     QModelIndex,
     QObject,
     QPoint,
+    QPointF,
     QRunnable,
     QSize,
     Qt,
@@ -31,7 +33,10 @@ from PySide6.QtGui import (
     QImage,
     QKeySequence,
     QPainter,
+    QPen,
     QPixmap,
+    QPolygon,
+    QPolygonF,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -307,20 +312,47 @@ class ExplorerWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        toolbar.addAction(self.new_window_action)
+        toolbar.addWidget(
+            self._create_toolbar_button(
+                action=self.new_window_action,
+                tooltip="New Window",
+                icon=self._build_toolbar_action_icon("new_window"),
+            )
+        )
         toolbar.addSeparator()
 
         self.back_action = QAction("Back", self)
+        self.back_action.setIcon(self._build_toolbar_action_icon("back"))
         self.back_action.triggered.connect(self.go_back)
-        toolbar.addAction(self.back_action)
+        toolbar.addWidget(
+            self._create_toolbar_button(
+                action=self.back_action,
+                tooltip="Back",
+                icon=self.back_action.icon(),
+            )
+        )
 
         self.forward_action = QAction("Forward", self)
+        self.forward_action.setIcon(self._build_toolbar_action_icon("forward"))
         self.forward_action.triggered.connect(self.go_forward)
-        toolbar.addAction(self.forward_action)
+        toolbar.addWidget(
+            self._create_toolbar_button(
+                action=self.forward_action,
+                tooltip="Forward",
+                icon=self.forward_action.icon(),
+            )
+        )
 
         self.up_action = QAction("Up", self)
+        self.up_action.setIcon(self._build_toolbar_action_icon("up"))
         self.up_action.triggered.connect(self.go_up)
-        toolbar.addAction(self.up_action)
+        toolbar.addWidget(
+            self._create_toolbar_button(
+                action=self.up_action,
+                tooltip="Up",
+                icon=self.up_action.icon(),
+            )
+        )
 
         toolbar.addSeparator()
 
@@ -330,12 +362,26 @@ class ExplorerWindow(QMainWindow):
         toolbar.addWidget(self.address_bar)
 
         self.go_action = QAction("Go", self)
+        self.go_action.setIcon(self._build_toolbar_action_icon("go"))
         self.go_action.triggered.connect(self._on_address_enter)
-        toolbar.addAction(self.go_action)
+        toolbar.addWidget(
+            self._create_toolbar_button(
+                action=self.go_action,
+                tooltip="Go",
+                icon=self.go_action.icon(),
+            )
+        )
 
         self.refresh_action = QAction("Refresh", self)
+        self.refresh_action.setIcon(self._build_toolbar_action_icon("refresh"))
         self.refresh_action.triggered.connect(self.refresh)
-        toolbar.addAction(self.refresh_action)
+        toolbar.addWidget(
+            self._create_toolbar_button(
+                action=self.refresh_action,
+                tooltip="Refresh",
+                icon=self.refresh_action.icon(),
+            )
+        )
 
         toolbar.addSeparator()
 
@@ -1498,6 +1544,34 @@ class ExplorerWindow(QMainWindow):
 
         QTimer.singleShot(delay_ms, resume_apply)
 
+    def _create_toolbar_button(self, action: QAction, tooltip: str, icon: QIcon) -> QToolButton:
+        button = QToolButton(self)
+        button.setDefaultAction(action)
+        button.setToolTip(tooltip)
+        button.setIcon(icon)
+        button.setIconSize(QSize(16, 16))
+        button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        button.setAutoRaise(True)
+        button.setFocusPolicy(Qt.NoFocus)
+        button.setStyleSheet(
+            """
+            QToolButton {
+                border: none;
+                background: transparent;
+                padding: 4px 6px;
+                margin: 0;
+                border-radius: 4px;
+            }
+            QToolButton:hover {
+                background: rgba(116, 99, 58, 0.08);
+            }
+            QToolButton:pressed {
+                background: rgba(112, 137, 185, 0.18);
+            }
+            """
+        )
+        return button
+
     def _create_view_mode_button(self, mode: str, tooltip: str, icon: QIcon) -> QToolButton:
         button = QToolButton(self)
         button.setToolTip(tooltip)
@@ -1509,23 +1583,112 @@ class ExplorerWindow(QMainWindow):
         button.setStyleSheet(
             """
             QToolButton {
-                border: 1px solid #9a998e;
-                background: #f4efe0;
-                padding: 3px 6px;
+                border: none;
+                background: transparent;
+                padding: 4px 6px;
                 margin: 0;
+                border-radius: 4px;
             }
             QToolButton:checked {
-                background: #dfe9f7;
-                border: 1px solid #6d8ec6;
+                background: rgba(112, 137, 185, 0.18);
             }
             QToolButton:hover {
-                background: #f8f2d9;
+                background: rgba(116, 99, 58, 0.08);
             }
             """
         )
         button.clicked.connect(lambda checked, current_mode=mode: self.set_view_mode(current_mode))
         self.view_mode_group.addButton(button)
         return button
+
+    @staticmethod
+    def _build_toolbar_action_icon(kind: str) -> QIcon:
+        size = 20
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        icon_color = QColor("#898989")
+        pen = QPen(icon_color, 1.8)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        if kind == "new_window":
+            painter.setPen(QPen(QColor("#898989"), 1.8))
+            painter.drawRoundedRect(2, 7, 10, 10, 2.5, 2.5)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#f4ff5a"))
+            star_points = QPolygon([
+                QPoint(13, -2),
+                QPoint(15, 4),
+                QPoint(21, 4),
+                QPoint(16, 7),
+                QPoint(18, 14),
+                QPoint(13, 10),
+                QPoint(8, 14),
+                QPoint(10, 7),
+                QPoint(5, 4),
+                QPoint(11, 4),
+            ])
+            painter.drawPolygon(star_points)
+        elif kind == "back":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#898989"))
+            painter.drawPolygon(QPolygon([
+                QPoint(11, 2),
+                QPoint(5, 8),
+                QPoint(11, 14),
+                QPoint(11, 10),
+                QPoint(15, 10),
+                QPoint(15, 6),
+                QPoint(11, 6),
+            ]))
+        elif kind == "forward":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#898989"))
+            painter.drawPolygon(QPolygon([
+                QPoint(9, 2),
+                QPoint(15, 8),
+                QPoint(9, 14),
+                QPoint(9, 10),
+                QPoint(5, 10),
+                QPoint(5, 6),
+                QPoint(9, 6),
+            ]))
+        elif kind == "up":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#898989"))
+            painter.drawPolygon(QPolygon([
+                QPoint(2, 11),
+                QPoint(8, 5),
+                QPoint(14, 11),
+                QPoint(10, 11),
+                QPoint(10, 15),
+                QPoint(6, 15),
+                QPoint(6, 11),
+            ]))
+        elif kind == "go":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#898989"))
+            painter.drawPolygon(QPolygon([
+                QPoint(2, 8),
+                QPoint(11, 8),
+                QPoint(11, 5),
+                QPoint(17, 10),
+                QPoint(11, 15),
+                QPoint(11, 12),
+                QPoint(2, 12),
+            ]))
+        elif kind == "refresh":
+            # Draw the arc (270 degrees - 3/4 circle)
+            arc_start_angle = 0
+            arc_span = 270
+            painter.drawArc(3, 3, 12, 12, arc_start_angle * 16, arc_span * 16)
+            
+
+
+        painter.end()
+        return QIcon(pixmap)
 
     @staticmethod
     def _build_view_mode_icon(mode: str) -> QIcon:
