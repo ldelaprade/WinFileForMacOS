@@ -37,9 +37,11 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QDialog,
     QFileIconProvider,
     QFileSystemModel,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -51,6 +53,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QToolBar,
+    QToolButton,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -336,10 +339,29 @@ class ExplorerWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self.view_toggle_action = QAction("Thumbnails", self)
-        self.view_toggle_action.setCheckable(True)
-        self.view_toggle_action.triggered.connect(self.toggle_view_mode)
-        toolbar.addAction(self.view_toggle_action)
+        self.view_mode_widget = QWidget(self)
+        self.view_mode_layout = QHBoxLayout(self.view_mode_widget)
+        self.view_mode_layout.setContentsMargins(0, 0, 0, 0)
+        self.view_mode_layout.setSpacing(0)
+
+        self.view_mode_group = QButtonGroup(self)
+        self.view_mode_group.setExclusive(True)
+
+        self.list_view_button = self._create_view_mode_button(
+            mode="list",
+            tooltip="Show in list",
+            icon=self._build_view_mode_icon("list"),
+        )
+        self.thumbnail_view_button = self._create_view_mode_button(
+            mode="thumbnail",
+            tooltip="Show as icons",
+            icon=self._build_view_mode_icon("thumbnail"),
+        )
+
+        self.view_mode_layout.addWidget(self.list_view_button)
+        self.view_mode_layout.addWidget(self.thumbnail_view_button)
+        toolbar.addWidget(self.view_mode_widget)
+        self._update_view_mode_buttons()
 
     def _setup_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -1476,21 +1498,91 @@ class ExplorerWindow(QMainWindow):
 
         QTimer.singleShot(delay_ms, resume_apply)
 
-    def toggle_view_mode(self) -> None:
-        if self._view_mode == "list":
+    def _create_view_mode_button(self, mode: str, tooltip: str, icon: QIcon) -> QToolButton:
+        button = QToolButton(self)
+        button.setToolTip(tooltip)
+        button.setCheckable(True)
+        button.setAutoExclusive(True)
+        button.setIcon(icon)
+        button.setIconSize(QSize(16, 16))
+        button.setFocusPolicy(Qt.NoFocus)
+        button.setStyleSheet(
+            """
+            QToolButton {
+                border: 1px solid #9a998e;
+                background: #f4efe0;
+                padding: 3px 6px;
+                margin: 0;
+            }
+            QToolButton:checked {
+                background: #dfe9f7;
+                border: 1px solid #6d8ec6;
+            }
+            QToolButton:hover {
+                background: #f8f2d9;
+            }
+            """
+        )
+        button.clicked.connect(lambda checked, current_mode=mode: self.set_view_mode(current_mode))
+        self.view_mode_group.addButton(button)
+        return button
+
+    @staticmethod
+    def _build_view_mode_icon(mode: str) -> QIcon:
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        if mode == "list":
+            painter.setPen(QColor("#898989"))
+            painter.setBrush(QColor("#898989"))
+            for row_index in range(3):
+                y = 3 + row_index * 4
+                painter.drawEllipse(1, y, 2, 2)
+                painter.drawRoundedRect(5, y, 9, 2, 1, 1)
+        else:
+            painter.setPen(QColor("#898989"))
+            painter.setBrush(QColor("#898989"))
+            cell_size = 5
+            positions = [(1, 1), (9, 1), (1, 9), (9, 9)]
+            for x, y in positions:
+                painter.drawRect(x, y, cell_size, cell_size)
+
+        painter.end()
+        return QIcon(pixmap)
+
+    def set_view_mode(self, mode: str) -> None:
+        if mode not in {"list", "thumbnail"}:
+            return
+
+        if mode == self._view_mode:
+            self._update_view_mode_buttons()
+            return
+
+        if mode == "thumbnail":
             self._view_mode = "thumbnail"
             self._populate_thumbnail_view(self.current_path())
             self.list_view.hide()
             self.thumbnail_view.show()
             self._ensure_thumbnail_width()
-            self.view_toggle_action.setChecked(True)
         else:
             self._view_mode = "list"
             self.thumbnail_view.hide()
             self.list_view.show()
             self._ensure_list_width()
-            self.view_toggle_action.setChecked(False)
+
+        self._update_view_mode_buttons()
         self._update_status()
+
+    def _update_view_mode_buttons(self) -> None:
+        if hasattr(self, "list_view_button") and hasattr(self, "thumbnail_view_button"):
+            self.list_view_button.setChecked(self._view_mode == "list")
+            self.thumbnail_view_button.setChecked(self._view_mode == "thumbnail")
+
+    def toggle_view_mode(self) -> None:
+        target_mode = "thumbnail" if self._view_mode == "list" else "list"
+        self.set_view_mode(target_mode)
 
     def _ensure_thumbnail_width(self) -> None:
         def apply_sizes() -> None:
