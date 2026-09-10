@@ -66,7 +66,8 @@ def normalize_network_share_input(raw_input: str) -> str:
             share_name = parts[1]
             unc = f"\\\\{host}\\{share_name}"
             if len(parts) > 2:
-                unc = f"{unc}\\{'\\'.join(parts[2:])}"
+                suffix = "\\".join(parts[2:])
+                unc = f"{unc}\\{suffix}"
             return unc
         return raw
 
@@ -75,7 +76,8 @@ def normalize_network_share_input(raw_input: str) -> str:
         if len(parts) >= 2:
             unc = f"\\\\{parts[0]}\\{parts[1]}"
             if len(parts) > 2:
-                unc = f"{unc}\\{'\\'.join(parts[2:])}"
+                suffix = "\\".join(parts[2:])
+                unc = f"{unc}\\{suffix}"
             return unc
     return raw
 
