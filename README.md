@@ -50,6 +50,14 @@ make build
 
 Outputs `dist/WinFileXP.app`. Drag to `/Applications` or `open dist/WinFileXP.app`.
 
+To package an unsigned DMG without an Apple Developer certificate:
+
+```bash
+make unsigned-dmg
+```
+
+This creates `dist/WinFileXP.dmg` using `hdiutil` (or `create-dmg` if installed).
+
 ### Trace packaged crashes (recommended when app exits immediately)
 
 Build a console/debug variant and run it from Terminal to see the full traceback:

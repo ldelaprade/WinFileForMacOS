@@ -16,7 +16,7 @@ DEV_ID        ?= Developer ID Application: Your Name (TEAMID)
 PROFILE       ?= notarytool-profile
 BUNDLE_ID     ?= com.yourname.explorer
 
-.PHONY: all build build-debug trace-debug release dmg notarize staple build-linux build-windows clean clean-all
+.PHONY: all build unsigned-dmg build-debug trace-debug release dmg notarize staple build-linux build-windows clean clean-all
 
 all: build
 
@@ -30,6 +30,9 @@ build:
 	@echo
 	@echo "Built: $(APP_BUNDLE)"
 	@echo "Drag to /Applications or run: open $(APP_BUNDLE)"
+
+unsigned-dmg: build dmg
+	@echo "✓ Unsigned DMG ready: $(DMG_NAME)"
 
 # ── Debug build for crash tracing ───────────────────────────────────────────
 build-debug:
