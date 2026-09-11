@@ -108,6 +108,10 @@ def xp_stylesheet() -> str:
     closed_arrow_path, open_arrow_path, closed_arrow_white_path, open_arrow_white_path = (
         _ensure_branch_arrow_icons()
     )
+    closed_arrow_path = Path(closed_arrow_path).resolve().as_posix()
+    open_arrow_path = Path(open_arrow_path).resolve().as_posix()
+    closed_arrow_white_path = Path(closed_arrow_white_path).resolve().as_posix()
+    open_arrow_white_path = Path(open_arrow_white_path).resolve().as_posix()
     return """
 QMainWindow {
     background-color: #f6f0dc;
@@ -155,19 +159,19 @@ QTreeView::branch:selected:!active {
 }
 
 QTreeView::branch:has-children:closed {
-    image: url(__CLOSED_ARROW_PATH__);
+    image: url("__CLOSED_ARROW_PATH__");
 }
 
 QTreeView::branch:has-children:open {
-    image: url(__OPEN_ARROW_PATH__);
+    image: url("__OPEN_ARROW_PATH__");
 }
 
 QTreeView::branch:has-children:closed:selected:active {
-    image: url(__CLOSED_ARROW_WHITE_PATH__);
+    image: url("__CLOSED_ARROW_WHITE_PATH__");
 }
 
 QTreeView::branch:has-children:open:selected:active {
-    image: url(__OPEN_ARROW_WHITE_PATH__);
+    image: url("__OPEN_ARROW_WHITE_PATH__");
 }
 
 QListWidget {

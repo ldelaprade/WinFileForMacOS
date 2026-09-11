@@ -243,7 +243,20 @@ class ExplorerWindow(QMainWindow):
         self.favorites_view.setDefaultDropAction(Qt.CopyAction)
         self.favorites_view.setAlternatingRowColors(True)
         self.favorites_view.setStyleSheet(
-            "QListWidget { alternate-background-color: #fbf7e8; }"
+            "QListWidget {"
+            " background: #fffdf3;"
+            " border: 1px solid #b8ad8a;"
+            " color: #000000;"
+            " alternate-background-color: #fbf7e8;"
+            " }"
+            "QListWidget::item:selected:active {"
+            " background: #316ac5;"
+            " color: #ffffff;"
+            " }"
+            "QListWidget::item:selected:!active {"
+            " background: #d7e2f2;"
+            " color: #1f3358;"
+            " }"
         )
         self.favorites_view.set_path_drop_callback(self._handle_favorites_drop)
         self.favorites_view.set_order_changed_callback(self._save_favorites_from_view_order)
