@@ -953,6 +953,7 @@ class ExplorerWindow(QMainWindow):
                 self.tree_view.setCurrentIndex(tree_index)
                 self.tree_view.scrollTo(tree_index)
         self.list_view.setRootIndex(root_index)
+        self._auto_resize_name_column()
         self.address_bar.setText(normalized)
 
         if self._view_mode == "thumbnail":
@@ -963,6 +964,9 @@ class ExplorerWindow(QMainWindow):
         self._update_nav_actions()
         self._update_status()
 
+    def _auto_resize_name_column(self) -> None:
+        self.list_view.resizeColumnToContents(0)
+
     def _on_directory_loaded(self, path: str) -> None:
         """Called by QFileSystemModel once it finishes scanning a directory.
 
@@ -972,6 +976,7 @@ class ExplorerWindow(QMainWindow):
         current = self.current_path()
         if os.path.normpath(path) == os.path.normpath(current):
             self.list_view.setRootIndex(self.fs_model.index(current))
+            self._auto_resize_name_column()
             self._update_status()
 
     def _on_address_enter(self) -> None:
@@ -1479,6 +1484,7 @@ class ExplorerWindow(QMainWindow):
         current = self.current_path()
         index = self.fs_model.index(current)
         self.list_view.setRootIndex(index)
+        self._auto_resize_name_column()
         if not self._is_windows_unc_path(current):
             tree_index = self.dir_model.index(current)
             self.tree_view.setCurrentIndex(tree_index)
@@ -1946,7 +1952,7 @@ class ExplorerWindow(QMainWindow):
         if kind == "new_window":
             painter.setPen(QPen(QColor("#898989"), 1.8))
             painter.drawRoundedRect(2, 7, 10, 10, 2.5, 2.5)
-            painter.setPen(Qt.NoPen)
+            painter.setPen(QPen(QColor("#a88a1f"), 1))
             painter.setBrush(QColor("#f4ff5a"))
             star_points = QPolygon([
                 QPoint(13, -2),
