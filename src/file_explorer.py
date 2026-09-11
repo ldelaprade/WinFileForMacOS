@@ -13,6 +13,7 @@ from urllib.parse import quote, urlparse, urlunparse
 import math
 from PySide6.QtCore import (
     QDir,
+    QEvent,
     QModelIndex,
     QObject,
     QPoint,
@@ -176,6 +177,12 @@ class ExplorerWindow(QMainWindow):
         self._thumbnail_retry_timer = QTimer(self)
         self._thumbnail_retry_timer.setSingleShot(True)
         self._thumbnail_retry_timer.timeout.connect(self._retry_ghost_thumbnails)
+        self._pending_navigation_path: str | None = None
+        self._pending_navigation_record_history = False
+        self._pending_navigation_token = 0
+        self._pending_navigation_timer = QTimer(self)
+        self._pending_navigation_timer.setSingleShot(True)
+        self._pending_navigation_timer.timeout.connect(self._apply_pending_navigation)
 
         self.new_window_action = QAction("New Window", self)
         self.new_window_action.setShortcut(QKeySequence.StandardKey.New)
@@ -287,7 +294,7 @@ class ExplorerWindow(QMainWindow):
             parent=network_section,
         )
         self.network_panel.navigate_requested.connect(
-            lambda path: self.navigate_to(path, record_history=True)
+            lambda path: self.request_navigate(path, record_history=True, defer_ms=120)
         )
         self.network_panel.edit_connection_requested.connect(
             self._edit_network_connection_parameters
@@ -346,6 +353,10 @@ class ExplorerWindow(QMainWindow):
         left_panel.setStretchFactor(0, 0)
         left_panel.setStretchFactor(1, 0)
         left_panel.setStretchFactor(2, 0)
+
+        self.favorites_view.installEventFilter(self)
+        self.tree_view.installEventFilter(self)
+        self.network_panel.installEventFilter(self)
 
     def _setup_toolbar(self) -> None:
         toolbar = QToolBar("Navigation", self)
@@ -494,6 +505,14 @@ class ExplorerWindow(QMainWindow):
         tree_enter_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         tree_enter_shortcut.activated.connect(self._on_tree_enter)
 
+        favorites_return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), self.favorites_view)
+        favorites_return_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        favorites_return_shortcut.activated.connect(self._on_favorites_enter)
+
+        favorites_enter_shortcut = QShortcut(QKeySequence(Qt.Key_Enter), self.favorites_view)
+        favorites_enter_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        favorites_enter_shortcut.activated.connect(self._on_favorites_enter)
+
         QShortcut(QKeySequence.StandardKey.Copy, self, activated=self.copy_selected)
         QShortcut(QKeySequence.StandardKey.Cut, self, activated=self.cut_selected)
         QShortcut(QKeySequence.StandardKey.Paste, self, activated=self.paste_into_current)
@@ -508,6 +527,11 @@ class ExplorerWindow(QMainWindow):
         if index.isValid():
             self._on_tree_clicked(index)
 
+    def _on_favorites_enter(self) -> None:
+        item = self.favorites_view.currentItem()
+        if item is not None:
+            self._on_favorite_activated(item)
+
     def _on_tree_clicked(self, index: QModelIndex) -> None:
         if not index.isValid():
             return
@@ -515,7 +539,77 @@ class ExplorerWindow(QMainWindow):
         if self._is_app_bundle(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
             return
-        self.navigate_to(path, record_history=True)
+        self.request_navigate(path, record_history=True)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+
+            if watched is self.favorites_view and key == Qt.Key_Down:
+                if self.favorites_view.count() > 0 and self.favorites_view.currentRow() == self.favorites_view.count() - 1:
+                    return self._focus_first_file_system_item()
+
+            if watched is self.tree_view:
+                current_index = self.tree_view.currentIndex()
+                if current_index.isValid() and key == Qt.Key_Down:
+                    if not self.tree_view.indexBelow(current_index).isValid():
+                        return self._focus_first_network_item()
+                if current_index.isValid() and key == Qt.Key_Up:
+                    if not self.tree_view.indexAbove(current_index).isValid():
+                        return self._focus_last_favorite_item()
+
+            if watched is self.network_panel:
+                current_item = self.network_panel.currentItem()
+                if current_item is not None and key == Qt.Key_Up:
+                    if self.network_panel.itemAbove(current_item) is None:
+                        return self._focus_last_file_system_item()
+
+        return super().eventFilter(watched, event)
+
+    def _focus_first_file_system_item(self) -> bool:
+        root_index = self.tree_view.rootIndex()
+        first_index = self.dir_model.index(0, 0, root_index)
+        if not first_index.isValid():
+            return True
+        self.tree_view.setFocus()
+        self.tree_view.setCurrentIndex(first_index)
+        self.tree_view.scrollTo(first_index)
+        return True
+
+    def _focus_last_file_system_item(self) -> bool:
+        root_index = self.tree_view.rootIndex()
+        first_index = self.dir_model.index(0, 0, root_index)
+        if not first_index.isValid():
+            return True
+
+        last_index = first_index
+        while True:
+            next_index = self.tree_view.indexBelow(last_index)
+            if not next_index.isValid():
+                break
+            last_index = next_index
+
+        self.tree_view.setFocus()
+        self.tree_view.setCurrentIndex(last_index)
+        self.tree_view.scrollTo(last_index)
+        return True
+
+    def _focus_last_favorite_item(self) -> bool:
+        count = self.favorites_view.count()
+        if count <= 0:
+            return self._focus_first_network_item()
+        self.favorites_view.setFocus()
+        self.favorites_view.setCurrentRow(count - 1)
+        return True
+
+    def _focus_first_network_item(self) -> bool:
+        first_item = self.network_panel.topLevelItem(0)
+        if first_item is None:
+            return True
+        self.network_panel.setFocus()
+        self.network_panel.setCurrentItem(first_item)
+        self.network_panel.scrollToItem(first_item)
+        return True
 
     def _on_list_double_clicked(self, index: QModelIndex) -> None:
         if not index.isValid():
@@ -804,22 +898,47 @@ class ExplorerWindow(QMainWindow):
     def _is_windows_unc_path(path: str) -> bool:
         return os.name == "nt" and path.startswith("\\\\")
 
+    def request_navigate(self, path: str, record_history: bool = False, defer_ms: int = 0) -> None:
+        self._pending_navigation_token += 1
+        self._pending_navigation_path = path
+        self._pending_navigation_record_history = record_history
+
+        if defer_ms > 0:
+            self._pending_navigation_timer.start(defer_ms)
+            return
+
+        if self._pending_navigation_timer.isActive():
+            self._pending_navigation_timer.stop()
+        self._apply_pending_navigation()
+
+    def _apply_pending_navigation(self) -> None:
+        path = self._pending_navigation_path
+        if path is None:
+            return
+
+        record_history = self._pending_navigation_record_history
+        self._pending_navigation_path = None
+        self._pending_navigation_record_history = False
+        self.navigate_to(path, record_history=record_history)
+
     def navigate_to(self, path: str, record_history: bool = False) -> None:
         normalized = os.path.abspath(os.path.expanduser(path))
         if self._is_app_bundle(normalized):
             QDesktopServices.openUrl(QUrl.fromLocalFile(normalized))
             return
-        if not os.path.isdir(normalized):
-            QMessageBox.warning(self, "Invalid path", f"Folder not found:\n{normalized}")
-            return
 
         self.fs_model.setRootPath(normalized)
         root_index = self.fs_model.index(normalized)
+        if not root_index.isValid():
+            QMessageBox.warning(self, "Invalid path", f"Folder not found:\n{normalized}")
+            return
+
         if not self._is_windows_unc_path(normalized):
             self.dir_model.setRootPath(normalized)
             tree_index = self.dir_model.index(normalized)
-            self.tree_view.setCurrentIndex(tree_index)
-            self.tree_view.scrollTo(tree_index)
+            if tree_index.isValid():
+                self.tree_view.setCurrentIndex(tree_index)
+                self.tree_view.scrollTo(tree_index)
         self.list_view.setRootIndex(root_index)
         self.address_bar.setText(normalized)
 

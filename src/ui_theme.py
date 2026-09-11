@@ -96,17 +96,35 @@ QTreeView {
     border: 1px solid #b8ad8a;
     alternate-background-color: #fbf7e8;
     color: #000000;
-    selection-background-color: #316ac5;
-    selection-color: #ffffff;
     gridline-color: #d6d6d6;
+}
+
+QTreeView::item:selected:active,
+QTreeWidget::item:selected:active {
+    background: #316ac5;
+    color: #ffffff;
+}
+
+QTreeView::item:selected:!active,
+QTreeWidget::item:selected:!active {
+    background: rgba(49, 106, 197, 0.32);
+    color: #1f3358;
 }
 
 QListWidget {
     background: #fffdf3;
     border: 1px solid #b8ad8a;
     color: #000000;
-    selection-background-color: #316ac5;
-    selection-color: #ffffff;
+}
+
+QListWidget::item:selected:active {
+    background: #316ac5;
+    color: #ffffff;
+}
+
+QListWidget::item:selected:!active {
+    background: rgba(49, 106, 197, 0.32);
+    color: #1f3358;
 }
 
 QHeaderView::section {
