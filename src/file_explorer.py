@@ -134,7 +134,7 @@ class ExplorerWindow(QMainWindow):
         initial_path: str | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("WinFile XP for Mac OS")
+        self.setWindowTitle("WinFile XP")
         self.resize(1200, 760)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self._open_new_window_callback = open_new_window_callback
