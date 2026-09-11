@@ -171,6 +171,74 @@ class FileDragListWidget(QListWidget):
         return [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
 
 
+class FavoritesListWidget(QListWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._path_drop_callback: Callable[[list[str]], bool] | None = None
+        self._order_changed_callback: Callable[[], None] | None = None
+
+    def set_path_drop_callback(self, callback: Callable[[list[str]], bool]) -> None:
+        self._path_drop_callback = callback
+
+    def set_order_changed_callback(self, callback: Callable[[], None]) -> None:
+        self._order_changed_callback = callback
+
+    def dragEnterEvent(self, event) -> None:
+        if self._extract_local_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if self._extract_local_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        if event.source() is self:
+            event.setDropAction(Qt.MoveAction)
+            super().dropEvent(event)
+            if self._order_changed_callback is not None:
+                self._order_changed_callback()
+            return
+
+        dropped_paths = self._extract_local_paths_from_mime(event.mimeData())
+        if not dropped_paths:
+            event.ignore()
+            return
+
+        if self._path_drop_callback is None:
+            event.ignore()
+            return
+
+        if self._path_drop_callback(dropped_paths):
+            event.acceptProposedAction()
+            return
+
+        event.ignore()
+
+    @staticmethod
+    def _extract_local_paths_from_mime(mime_data: QMimeData) -> list[str]:
+        local_paths = [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
+        if local_paths:
+            return local_paths
+
+        if mime_data.hasFormat("text/uri-list"):
+            raw_payload = bytes(mime_data.data("text/uri-list")).decode("utf-8", errors="ignore")
+            parsed_paths: list[str] = []
+            for line in raw_payload.splitlines():
+                candidate = line.strip()
+                if not candidate or candidate.startswith("#"):
+                    continue
+                url = QUrl(candidate)
+                if url.isLocalFile():
+                    parsed_paths.append(url.toLocalFile())
+            return parsed_paths
+
+        return []
+
+
 def _build_file_drag_mime_data(source_paths: list[str]) -> QMimeData:
     mime_data = QMimeData()
     urls = [QUrl.fromLocalFile(path) for path in source_paths]

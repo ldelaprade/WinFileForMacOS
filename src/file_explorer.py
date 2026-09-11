@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QThreadPool,
     QTimer,
     QUrl,
+    QSettings,
     Signal,
 )
 from PySide6.QtGui import (
@@ -70,7 +71,7 @@ from .dialogs import (
     build_delete_confirmation_message,
     build_move_confirmation_message,
 )
-from .dragdrop_views import ConfirmingDropTreeView, FileDragListWidget
+from .dragdrop_views import ConfirmingDropTreeView, FavoritesListWidget, FileDragListWidget
 from .network_panel import (
     NetworkPanel,
     mount_smb_share,
@@ -128,6 +129,8 @@ class _ThumbnailPreviewWorker(QRunnable):
 
 
 class ExplorerWindow(QMainWindow):
+    _FAVORITES_SETTINGS_KEY = "favorites/paths"
+
     def __init__(
         self,
         open_new_window_callback: Callable[[str | None], None] | None = None,
@@ -138,6 +141,10 @@ class ExplorerWindow(QMainWindow):
         self.resize(1200, 760)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self._open_new_window_callback = open_new_window_callback
+        self._settings = QSettings("WinFileXP", "WinFileXP")
+        self._favorite_paths = self._load_favorite_paths()
+        if not self._settings.contains(self._FAVORITES_SETTINGS_KEY):
+            self._save_favorite_paths()
 
         self.navigation_history = NavigationHistory()
         self._clipboard_paths: list[str] = []
@@ -212,11 +219,39 @@ class ExplorerWindow(QMainWindow):
 
         left_panel = QSplitter(Qt.Vertical, self.splitter)
 
+        favorites_section = QWidget(left_panel)
+        favorites_layout = QVBoxLayout(favorites_section)
+        favorites_layout.setContentsMargins(0, 0, 0, 0)
+        favorites_layout.setSpacing(4)
+        favorites_header = QLabel("Favorites", favorites_section)
+        favorites_header.setStyleSheet("font-weight: bold; padding-left: 4px;")
+        favorites_layout.addWidget(favorites_header)
+
+        self.favorites_view = FavoritesListWidget(favorites_section)
+        self.favorites_view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.favorites_view.setDragEnabled(True)
+        self.favorites_view.setAcceptDrops(True)
+        self.favorites_view.setDropIndicatorShown(True)
+        self.favorites_view.setDragDropMode(QListWidget.DragDrop)
+        self.favorites_view.setDefaultDropAction(Qt.CopyAction)
+        self.favorites_view.setAlternatingRowColors(True)
+        self.favorites_view.setStyleSheet(
+            "QListWidget { alternate-background-color: #fbf7e8; }"
+        )
+        self.favorites_view.set_path_drop_callback(self._handle_favorites_drop)
+        self.favorites_view.set_order_changed_callback(self._save_favorites_from_view_order)
+        self.favorites_view.itemActivated.connect(self._on_favorite_activated)
+        self.favorites_view.itemClicked.connect(self._on_favorite_activated)
+        self.favorites_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.favorites_view.customContextMenuRequested.connect(self._show_favorites_context_menu)
+        favorites_layout.addWidget(self.favorites_view)
+        self._refresh_favorites_view()
+
         local_section = QWidget(left_panel)
         local_layout = QVBoxLayout(local_section)
         local_layout.setContentsMargins(0, 0, 0, 0)
         local_layout.setSpacing(4)
-        local_header = QLabel("Local folders", local_section)
+        local_header = QLabel("File System", local_section)
         local_header.setStyleSheet("font-weight: bold; padding-left: 4px;")
         local_layout.addWidget(local_header)
 
@@ -226,12 +261,15 @@ class ExplorerWindow(QMainWindow):
         self.tree_view.setColumnHidden(1, True)
         self.tree_view.setColumnHidden(2, True)
         self.tree_view.setColumnHidden(3, True)
+        self.tree_view.setDragEnabled(True)
         self.tree_view.setAcceptDrops(True)
         self.tree_view.setDropIndicatorShown(True)
-        self.tree_view.setDragDropMode(QTreeView.DropOnly)
+        self.tree_view.setDragDropMode(QTreeView.DragDrop)
         self.tree_view.setDefaultDropAction(Qt.MoveAction)
         self.tree_view.set_move_confirm_callback(self._confirm_drag_move)
         self.tree_view.clicked.connect(self._on_tree_clicked)
+        self.tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree_view.customContextMenuRequested.connect(self._show_file_system_context_menu)
         # Disable edit triggers (no rename on Enter or double-click)
         self.tree_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         local_layout.addWidget(self.tree_view)
@@ -254,6 +292,7 @@ class ExplorerWindow(QMainWindow):
         self.network_panel.edit_connection_requested.connect(
             self._edit_network_connection_parameters
         )
+        self.network_panel.add_to_favorites_requested.connect(self._add_favorite_with_feedback)
         network_layout.addWidget(self.network_panel)
 
         self.list_view = ConfirmingDropTreeView(self.splitter)
@@ -303,9 +342,10 @@ class ExplorerWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 1)
-        left_panel.setSizes([420, 140])
+        left_panel.setSizes([170, 360, 170])
         left_panel.setStretchFactor(0, 0)
         left_panel.setStretchFactor(1, 0)
+        left_panel.setStretchFactor(2, 0)
 
     def _setup_toolbar(self) -> None:
         toolbar = QToolBar("Navigation", self)
@@ -595,6 +635,164 @@ class ExplorerWindow(QMainWindow):
         else:
             global_pos = self.mapToGlobal(pos)
         menu.exec(global_pos)
+
+    def _show_favorites_context_menu(self, pos: QPoint) -> None:
+        menu = QMenu(self)
+        menu.addAction("Add Current Folder", lambda: self._add_favorite_with_feedback(self.current_path()))
+
+        item = self.favorites_view.itemAt(pos)
+        if item is not None:
+            path = item.data(Qt.UserRole)
+            if isinstance(path, str) and path:
+                menu.addSeparator()
+                menu.addAction("Open", lambda current_path=path: self.navigate_to(current_path, record_history=True))
+                menu.addAction("Remove", lambda current_path=path: self._remove_favorite_path(current_path))
+
+        menu.exec(self.favorites_view.viewport().mapToGlobal(pos))
+
+    def _show_file_system_context_menu(self, pos: QPoint) -> None:
+        index = self.tree_view.indexAt(pos)
+        if not index.isValid():
+            return
+
+        path = self.dir_model.filePath(index)
+        if not path:
+            return
+
+        menu = QMenu(self)
+        menu.addAction("Browse", lambda target_path=path: self.navigate_to(target_path, record_history=True))
+        menu.addAction("Add to Favorites", lambda target_path=path: self._add_favorite_with_feedback(target_path))
+        menu.exec(self.tree_view.viewport().mapToGlobal(pos))
+
+    def _on_favorite_activated(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.UserRole)
+        if not isinstance(path, str) or not path:
+            return
+        if not os.path.isdir(path):
+            QMessageBox.warning(
+                self,
+                "Favorites",
+                f"Folder not found:\n{path}",
+            )
+            return
+        self.navigate_to(path, record_history=True)
+
+    def _handle_favorites_drop(self, dropped_paths: list[str]) -> bool:
+        added = False
+        for path in dropped_paths:
+            if self._add_favorite_path(path, persist=False):
+                added = True
+
+        if added:
+            self._save_favorite_paths()
+            self._refresh_favorites_view()
+            self.status.showMessage("Added to Favorites", 1800)
+        return added
+
+    def _save_favorites_from_view_order(self) -> None:
+        ordered_paths: list[str] = []
+        for row in range(self.favorites_view.count()):
+            item = self.favorites_view.item(row)
+            if item is None:
+                continue
+            path = item.data(Qt.UserRole)
+            if not isinstance(path, str) or not path:
+                continue
+            ordered_paths.append(path)
+
+        if ordered_paths:
+            self._favorite_paths = ordered_paths
+            self._save_favorite_paths()
+
+    def _default_favorite_paths(self) -> list[str]:
+        home = Path.home()
+        candidates = [
+            home,
+            home / "Desktop",
+            home / "Downloads",
+        ]
+        defaults: list[str] = []
+        for candidate in candidates:
+            path = str(candidate)
+            if os.path.isdir(path):
+                defaults.append(path)
+        return defaults
+
+    def _load_favorite_paths(self) -> list[str]:
+        if not self._settings.contains(self._FAVORITES_SETTINGS_KEY):
+            return self._default_favorite_paths()
+
+        stored_paths = self._settings.value(self._FAVORITES_SETTINGS_KEY, [])
+        if isinstance(stored_paths, str):
+            stored_paths = [stored_paths]
+        if not isinstance(stored_paths, list):
+            return []
+
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw_path in stored_paths:
+            if not isinstance(raw_path, str):
+                continue
+            normalized = os.path.abspath(os.path.expanduser(raw_path.strip()))
+            if not normalized or not os.path.isdir(normalized):
+                continue
+            key = os.path.normcase(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(normalized)
+        return cleaned
+
+    def _save_favorite_paths(self) -> None:
+        self._settings.setValue(self._FAVORITES_SETTINGS_KEY, self._favorite_paths)
+
+    def _refresh_favorites_view(self) -> None:
+        self.favorites_view.clear()
+        icon = self.fs_model.iconProvider().icon(QFileIconProvider.Folder)
+        for path in self._favorite_paths:
+            item = QListWidgetItem(path)
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            item.setIcon(icon)
+            self.favorites_view.addItem(item)
+
+    def _add_favorite_path(self, path: str, persist: bool = True) -> bool:
+        normalized = os.path.abspath(os.path.expanduser(path.strip()))
+        if not normalized or not os.path.isdir(normalized):
+            return False
+
+        key = os.path.normcase(normalized)
+        for existing_path in self._favorite_paths:
+            if os.path.normcase(existing_path) == key:
+                return False
+
+        self._favorite_paths.append(normalized)
+        if persist:
+            self._save_favorite_paths()
+            self._refresh_favorites_view()
+        return True
+
+    def _add_favorite_with_feedback(self, path: str) -> None:
+        if self._add_favorite_path(path):
+            self.status.showMessage("Added to Favorites", 1800)
+            return
+
+        normalized = os.path.abspath(os.path.expanduser(path.strip()))
+        if not normalized or not os.path.isdir(normalized):
+            self.status.showMessage("Folder not available for Favorites", 2000)
+            return
+
+        self.status.showMessage("Already in Favorites", 1600)
+
+    def _remove_favorite_path(self, path: str) -> None:
+        key = os.path.normcase(path)
+        self._favorite_paths = [
+            existing_path
+            for existing_path in self._favorite_paths
+            if os.path.normcase(existing_path) != key
+        ]
+        self._save_favorite_paths()
+        self._refresh_favorites_view()
 
     def current_path(self) -> str:
         root_index = self.list_view.rootIndex()

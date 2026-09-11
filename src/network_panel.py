@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Callable
 from urllib.parse import unquote, urlparse
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QMimeData, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWidgetItem, QWidget, QFileIconProvider
 
@@ -264,6 +264,7 @@ class NetworkPanel(QTreeWidget):
 
     navigate_requested: Signal = Signal(str)
     edit_connection_requested: Signal = Signal(str, str)
+    add_to_favorites_requested: Signal = Signal(str)
     _PATH_ROLE = Qt.UserRole
     _IS_SHARE_ROLE = Qt.UserRole + 1
     _LOADED_ROLE = Qt.UserRole + 2
@@ -285,6 +286,9 @@ class NetworkPanel(QTreeWidget):
 
         self.setHeaderHidden(True)
         self.setRootIsDecorated(True)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QTreeWidget.DragOnly)
+        self.setDefaultDropAction(Qt.CopyAction)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.itemClicked.connect(self._on_item_clicked)
@@ -348,6 +352,7 @@ class NetworkPanel(QTreeWidget):
             is_share_root = bool(item.data(0, self._IS_SHARE_ROLE))
             if path:
                 menu.addAction("Browse", lambda p=path: self.navigate_requested.emit(p))
+                menu.addAction("Add to Favorites", lambda p=path: self.add_to_favorites_requested.emit(p))
             if is_share_root:
                 source_url = item.data(0, self._SOURCE_URL_ROLE) or ""
                 menu.addSeparator()
@@ -368,6 +373,26 @@ class NetworkPanel(QTreeWidget):
             self.unregister_known_windows_share(path)
             unmount_share(path)
         self.refresh_shares()
+
+    def mimeData(self, items: list[QTreeWidgetItem]) -> QMimeData:
+        mime_data = QMimeData()
+        urls: list[QUrl] = []
+
+        for item in items:
+            path = item.data(0, self._PATH_ROLE)
+            if not isinstance(path, str) or not path:
+                continue
+            if not os.path.exists(path):
+                continue
+            urls.append(QUrl.fromLocalFile(path))
+
+        if not urls:
+            return mime_data
+
+        mime_data.setUrls(urls)
+        uri_list = "\r\n".join(url.toString(QUrl.FullyEncoded) for url in urls) + "\r\n"
+        mime_data.setData("text/uri-list", uri_list.encode("utf-8"))
+        return mime_data
 
     def register_known_windows_share(self, mount_path: str) -> None:
         if os.name != "nt":
