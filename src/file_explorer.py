@@ -9,8 +9,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse, urlunparse
-
 import math
+
+
 from PySide6.QtCore import (
     QDir,
     QEvent,
@@ -18,6 +19,7 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     QPointF,
+    QRectF,
     QRunnable,
     QSize,
     Qt,
@@ -35,6 +37,7 @@ from PySide6.QtGui import (
     QImage,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QPolygon,
@@ -1938,6 +1941,74 @@ class ExplorerWindow(QMainWindow):
         return button
 
     @staticmethod
+    def draw_refresh_icon(
+        painter: QPainter,
+        x: float = 0.0,
+        y: float = 0.0,
+        size: float = 18.0,
+        color: QColor = QColor("#7A7A6E"),
+    ) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        pad = size * 0.18
+        rect = QRectF(x + pad, y + pad, size - 2 * pad, size - 2 * pad)
+
+        pen_width = max(1.6, size * 0.10)
+        pen = QPen(color, pen_width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+
+        # Arc
+        start_deg = 135.0
+        span_deg = 300.0
+        path = QPainterPath()
+        path.arcMoveTo(rect, start_deg)
+        path.arcTo(rect, start_deg, span_deg)
+        painter.drawPath(path)
+
+        # Exact endpoint of the drawn arc
+        tip = path.currentPosition()
+
+        # Tangent from actual path geometry (near-end sample)
+        p_prev = path.pointAtPercent(0.985)
+        tx = tip.x() - p_prev.x()
+        ty = tip.y() - p_prev.y()
+        ln = math.hypot(tx, ty) or 1.0
+        tx, ty = tx / ln, ty / ln
+
+        # Build open arrowhead from tip
+        back_x, back_y = -tx, -ty
+
+        # Tuneables
+        arm_len = size * 0.22 + 1.5
+        arm_open_deg = 40.0
+        arrow_rotation_deg = 25.0  # +clockwise / -counter-clockwise visual tweak
+
+        def rot(vx: float, vy: float, ang: float) -> tuple[float, float]:
+            c, s = math.cos(ang), math.sin(ang)
+            return vx * c - vy * s, vx * s + vy * c
+
+        # Apply global arrow rotation first
+        r = math.radians(arrow_rotation_deg) 
+        base_x, base_y = rot(back_x, back_y, r)
+
+        # Then split into the two arms
+        a = math.radians(arm_open_deg)
+        d1x, d1y = rot(base_x, base_y, +a)
+        d2x, d2y = rot(base_x, base_y, -a)
+
+        p1 = QPointF(tip.x() + d1x * arm_len, tip.y() + d1y * arm_len)
+        p2 = QPointF(tip.x() + d2x * arm_len, tip.y() + d2y * arm_len)
+
+        # Arms join exactly at arc endpoint
+        painter.drawLine(tip, p1)
+        painter.drawLine(tip, p2)
+
+        painter.restore()
+
+    @staticmethod
     def _build_toolbar_action_icon(kind: str) -> QIcon:
         size = 20
         pixmap = QPixmap(size, size)
@@ -2016,12 +2087,7 @@ class ExplorerWindow(QMainWindow):
                 QPoint(2, 12),
             ]))
         elif kind == "refresh":
-            # Draw the arc (270 degrees - 3/4 circle)
-            arc_start_angle = 0
-            arc_span = 270
-            painter.drawArc(3, 3, 12, 12, arc_start_angle * 16, arc_span * 16)
-            
-
+            ExplorerWindow.draw_refresh_icon(painter)
 
         painter.end()
         return QIcon(pixmap)
