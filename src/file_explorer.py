@@ -72,6 +72,8 @@ from PySide6.QtWidgets import (
 from .dialogs import (
     ActionConfirmDialog,
     DeleteConfirmDialog,
+    SshLocationDialog,
+    WindowsShareDialog,
     build_delete_confirmation_message,
     build_move_confirmation_message,
 )
@@ -83,6 +85,7 @@ from .network_panel import (
     resolve_smb_mount_paths,
     unmount_share,
 )
+from .ssh_mount import start_ssh_mount
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
 from .thumbnail_previews import ThumbnailPreviewProvider
@@ -156,6 +159,9 @@ class ExplorerWindow(QMainWindow):
         self._view_mode: str = "list"  # "list" or "thumbnail"
         self.thumbnail_provider: ThumbnailPreviewProvider | None = None
         self._network_poll_attempts = 0
+        self._ssh_mount_poll_attempts = 0
+        self._ssh_mount_process: subprocess.Popen[bytes] | None = None
+        self._ssh_mount_path: Path | None = None
         self._thumbnail_render_token = 0
         self._thumbnail_pending_items: list[tuple[QListWidgetItem, str]] = []
         self._thumbnail_pending_index = 0
@@ -307,6 +313,7 @@ class ExplorerWindow(QMainWindow):
 
         self.network_panel = NetworkPanel(
             connect_callback=self.connect_network_share,
+            ssh_callback=self.add_ssh_network_location,
             parent=network_section,
         )
         self.network_panel.navigate_requested.connect(
@@ -990,23 +997,106 @@ class ExplorerWindow(QMainWindow):
             return
         self.navigate_to(entered, record_history=True)
 
+    def add_ssh_network_location(self) -> None:
+        dialog = SshLocationDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        values = dialog.values()
+        server = str(values["server"])
+        port = int(values["port"])
+        folder = str(values["folder"])
+        username = str(values["username"])
+        password = str(values["password"])
+
+        process, mount_path, error = start_ssh_mount(
+            server=server,
+            port=port,
+            folder=folder,
+            username=username,
+            password=password,
+        )
+        if error is not None or process is None:
+            QMessageBox.warning(
+                self,
+                "Add SSH Network Location",
+                error or "Could not start SSHFS.",
+            )
+            return
+
+        self._ssh_mount_process = process
+        self._ssh_mount_path = mount_path
+        self._ssh_mount_poll_attempts = 0
+        self.status.showMessage(
+            "Connecting to SSH network location...",
+            6000,
+        )
+        self._poll_for_ssh_mount(mount_path)
+
+    def _poll_for_ssh_mount(self, mount_path: Path) -> None:
+        if os.path.ismount(mount_path):
+            self.network_panel.refresh_shares()
+            self.navigate_to(str(mount_path), record_history=True)
+            self.status.showMessage("SSH network location connected", 3000)
+            return
+
+        process = self._ssh_mount_process
+        if process is not None and process.poll() is not None:
+            QMessageBox.warning(
+                self,
+                "Add SSH Network Location",
+                "SSHFS exited before the location was mounted. Check the server, credentials, and SSHFS installation.",
+            )
+            return
+
+        self._ssh_mount_poll_attempts += 1
+        if self._ssh_mount_poll_attempts >= 30:
+            QMessageBox.warning(
+                self,
+                "Add SSH Network Location",
+                "The SSH location was not mounted within 30 seconds.",
+            )
+            return
+
+        QTimer.singleShot(1000, lambda: self._poll_for_ssh_mount(mount_path))
+
     def connect_network_share(self, share_url: str | None = None) -> None:
+        connection_credentials: tuple[str, str, bool] | None = None
         target_url = normalize_network_share_input((share_url or "").strip())
         if not target_url:
-            prompt = "SMB URL (example: smb://server/share):"
-            default_text = "smb://"
-            if os.name == "nt":
-                prompt = "Network share path (example: \\\\server\\share):"
-                default_text = "\\\\"
-            target_url, ok = QInputDialog.getText(
-                self,
-                "Connect Network Share",
-                prompt,
-                text=default_text,
-            )
-            if not ok:
+            dialog = WindowsShareDialog(self)
+            if dialog.exec() != QDialog.Accepted:
                 return
-            target_url = normalize_network_share_input(target_url.strip())
+            values = dialog.values()
+            server = values["server"].strip().strip("/\\")
+            share = values["share"].strip().strip("/\\")
+            folder = values["folder"].strip().strip("/\\")
+            target_url = f"smb://{server}/{share}"
+            if folder:
+                target_url = f"{target_url}/{folder.replace('\\', '/')}"
+
+            username = values["username"]
+            password = values["password"]
+            domain = values["domain"]
+            if username or password:
+                if domain:
+                    username = f"{domain}\\{username}" if username else domain
+                connection_credentials = (username, password, False)
+                if os.name != "nt":
+                    userinfo = quote(username, safe="")
+                    if password:
+                        userinfo = f"{userinfo}:{quote(password, safe='')}"
+                    parsed_target = urlparse(target_url)
+                    target_url = urlunparse(
+                        (
+                            parsed_target.scheme,
+                            f"{userinfo}@{parsed_target.netloc}",
+                            parsed_target.path,
+                            "",
+                            "",
+                            "",
+                        )
+                    )
 
         if not target_url:
             return
@@ -1015,8 +1105,8 @@ class ExplorerWindow(QMainWindow):
         if mount_root is None:
             QMessageBox.warning(
                 self,
-                "Connect Network Share",
-                "Invalid network share path. Use smb://server/share or \\\\server\\share.",
+                "Add Network Location",
+                "Invalid network location. Use smb://server/share or \\\\server\\share.",
             )
             return
 
@@ -1033,19 +1123,19 @@ class ExplorerWindow(QMainWindow):
             return
 
         if os.name == "nt":
-            self._connect_windows_unc_share(mount_root, target_path)
+            self._connect_windows_unc_share(mount_root, target_path, connection_credentials)
             return
 
         if not mount_smb_share(target_url):
             QMessageBox.warning(
                 self,
-                "Connect Network Share",
-                "Could not initiate SMB connection. Check address and try again.",
+                    "Add Network Location",
+                    "Could not initiate network connection. Check address and try again.",
             )
             return
 
         self.status.showMessage(
-            "Connecting to network share. Complete login if prompted...",
+            "Connecting to network location. Complete login if prompted...",
             6000,
         )
         self._network_poll_attempts = 0
@@ -1150,8 +1240,8 @@ class ExplorerWindow(QMainWindow):
         if self._network_poll_attempts > 20:
             QMessageBox.information(
                 self,
-                "Connect Network Share",
-                "Share was not mounted yet. If login prompt is open, finish it and retry.\n\n"
+                "Add Network Location",
+                "Location was not mounted yet. If a login prompt is open, finish it and retry.\n\n"
                 f"Expected mount path:\n{mount_root}",
             )
             return
@@ -1170,7 +1260,7 @@ class ExplorerWindow(QMainWindow):
     def _prompt_windows_credentials(self) -> tuple[str, str, bool] | None:
         username, ok = QInputDialog.getText(
             self,
-            "Connect Network Share",
+            "Add Network Location",
             "User name (DOMAIN\\user, server\\user, or user):",
             text="",
         )
@@ -1180,7 +1270,7 @@ class ExplorerWindow(QMainWindow):
 
         password, ok = QInputDialog.getText(
             self,
-            "Connect Network Share",
+            "Add Network Location",
             "Password (optional):",
             QLineEdit.Password,
             "",
@@ -1200,10 +1290,18 @@ class ExplorerWindow(QMainWindow):
         )
         return username, password, save_credentials
 
-    def _connect_windows_unc_share(self, mount_root: str, target_path: str) -> None:
-        creds = self._prompt_windows_credentials()
+    def _connect_windows_unc_share(
+        self,
+        mount_root: str,
+        target_path: str,
+        connection_credentials: tuple[str, str, bool] | None = None,
+    ) -> None:
+        creds = connection_credentials
         if creds is None:
-            return
+            prompted = self._prompt_windows_credentials()
+            if prompted is None:
+                return
+            creds = prompted
         username, password, save_credentials = creds
 
         host, _share = self._split_unc_mount_root(mount_root)
@@ -1225,16 +1323,16 @@ class ExplorerWindow(QMainWindow):
             except OSError as error:
                 QMessageBox.warning(
                     self,
-                    "Connect Network Share",
-                    f"Could not save credentials: {error}",
+                        "Add Network Location",
+                        f"Could not save credentials: {error}",
                 )
                 return
             if cmdkey_result.returncode != 0:
                 detail = (cmdkey_result.stderr or cmdkey_result.stdout).strip() or "Unknown error"
                 QMessageBox.warning(
                     self,
-                    "Connect Network Share",
-                    f"Could not save credentials in Credential Manager:\n{detail}",
+                        "Add Network Location",
+                        f"Could not save credentials in Credential Manager:\n{detail}",
                 )
                 return
 
@@ -1257,8 +1355,8 @@ class ExplorerWindow(QMainWindow):
         except OSError as error:
             QMessageBox.warning(
                 self,
-                "Connect Network Share",
-                f"Could not run net use: {error}",
+                    "Add Network Location",
+                    f"Could not run net use: {error}",
             )
             return
 
@@ -1266,8 +1364,8 @@ class ExplorerWindow(QMainWindow):
             detail = (net_use_result.stderr or net_use_result.stdout).strip() or "Unknown error"
             QMessageBox.warning(
                 self,
-                "Connect Network Share",
-                f"Windows could not connect to the share:\n{detail}",
+                    "Add Network Location",
+                    f"Windows could not connect to the share:\n{detail}",
             )
             return
 
@@ -1283,8 +1381,8 @@ class ExplorerWindow(QMainWindow):
 
         QMessageBox.warning(
             self,
-            "Connect Network Share",
-            "Share connected but path is still not accessible. Verify share path and permissions.",
+                "Add Network Location",
+                "Share connected but path is still not accessible. Verify share path and permissions.",
         )
 
     def _refresh_network_panel_with_retries(self, retries: int = 4, delay_ms: int = 500) -> None:

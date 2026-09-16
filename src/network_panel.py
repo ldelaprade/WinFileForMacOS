@@ -11,6 +11,7 @@ from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWidgetItem, QWidget, QFileIconProvider
 
 from .ui_theme import XPIconProvider
+from .ssh_mount import unmount_ssh_path
 
 
 _WINDOWS_KNOWN_SHARES_KEY = "network/known_windows_shares"
@@ -36,7 +37,10 @@ def get_mounted_network_shares() -> list[tuple[str, str, str]]:
         if " on " not in line:
             continue
         lower = line.lower()
-        if not any(t in lower for t in ("smbfs", "nfs", "afpfs", "cifs", "webdav")):
+        if not any(
+            t in lower
+            for t in ("smbfs", "nfs", "afpfs", "cifs", "webdav", "fuse", "sshfs")
+        ):
             continue
         source, rest = line.split(" on ", 1)
         mount_path = rest.strip().split(" ")[0]
@@ -133,6 +137,9 @@ def _get_windows_network_shares() -> list[tuple[str, str, str]]:
 
 
 def _mounted_source_to_url(source: str, lower_mount_line: str) -> str:
+    if "fuse" in lower_mount_line or "sshfs" in lower_mount_line:
+        return f"ssh://{source}"
+
     if "smbfs" in lower_mount_line or "cifs" in lower_mount_line:
         # macOS often reports SMB source as //user@host/share.
         smb_source = source[2:] if source.startswith("//") else source
@@ -162,9 +169,10 @@ def _mounted_source_to_url(source: str, lower_mount_line: str) -> str:
 
 def mount_smb_share(smb_url: str) -> bool:
     """Trigger macOS to mount an SMB share via AppleScript — no Finder window."""
+    applescript_url = smb_url.replace("\\", "\\\\").replace('"', '\\"')
     try:
         subprocess.Popen(
-            ["osascript", "-e", f'mount volume "{smb_url}"'],
+            ["osascript", "-e", f'mount volume "{applescript_url}"'],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -175,6 +183,9 @@ def mount_smb_share(smb_url: str) -> bool:
 
 def unmount_share(mount_path: str) -> bool:
     """Unmount a network share by its local mount path."""
+    if "ssh_mounts" in mount_path:
+        return unmount_ssh_path(mount_path)
+
     if os.name == "nt":
         try:
             result = subprocess.run(
@@ -273,10 +284,12 @@ class NetworkPanel(QTreeWidget):
     def __init__(
         self,
         connect_callback: Callable[[], None],
+        ssh_callback: Callable[[], None],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._connect_callback = connect_callback
+        self._ssh_callback = ssh_callback
         self._settings = QSettings("WinFileXP", "WinFileXP")
         self._known_windows_shares = self._load_known_windows_shares()
         style = QApplication.style()
@@ -343,9 +356,12 @@ class NetworkPanel(QTreeWidget):
     def _on_context_menu(self, pos) -> None:
         item = self.itemAt(pos)
         menu = QMenu(self)
+        add_location_menu = QMenu("Add Network Location", menu)
+        add_location_menu.addAction("Windows Share (SMB)...", self._connect_callback)
+        add_location_menu.addAction("SSH...", self._ssh_callback)
 
         if item is None:
-            menu.addAction("Connect Network Share...", self._connect_callback)
+            menu.addMenu(add_location_menu)
             menu.addAction("Refresh", self.refresh_shares)
         else:
             path = item.data(0, self._PATH_ROLE)
@@ -362,7 +378,7 @@ class NetworkPanel(QTreeWidget):
                 )
                 menu.addAction("Disconnect", lambda i=item: self._on_disconnect(i))
             menu.addSeparator()
-            menu.addAction("Connect Network Share...", self._connect_callback)
+            menu.addMenu(add_location_menu)
             menu.addAction("Refresh", self.refresh_shares)
 
         menu.exec(self.viewport().mapToGlobal(pos))
