@@ -73,6 +73,7 @@ from .dialogs import (
     ActionConfirmDialog,
     DeleteConfirmDialog,
     SshLocationDialog,
+    FtpLocationDialog,
     WindowsShareDialog,
     build_delete_confirmation_message,
     build_move_confirmation_message,
@@ -86,6 +87,7 @@ from .network_panel import (
     unmount_share,
 )
 from .ssh_mount import start_ssh_mount
+from .ftp_mount import start_ftp_mount
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
 from .thumbnail_previews import ThumbnailPreviewProvider
@@ -162,6 +164,9 @@ class ExplorerWindow(QMainWindow):
         self._ssh_mount_poll_attempts = 0
         self._ssh_mount_process: subprocess.Popen[bytes] | None = None
         self._ssh_mount_path: Path | None = None
+        self._ftp_mount_poll_attempts = 0
+        self._ftp_mount_process: subprocess.Popen[bytes] | None = None
+        self._ftp_mount_path: Path | None = None
         self._thumbnail_render_token = 0
         self._thumbnail_pending_items: list[tuple[QListWidgetItem, str]] = []
         self._thumbnail_pending_index = 0
@@ -314,6 +319,7 @@ class ExplorerWindow(QMainWindow):
         self.network_panel = NetworkPanel(
             connect_callback=self.connect_network_share,
             ssh_callback=self.add_ssh_network_location,
+            ftp_callback=self.add_ftp_network_location,
             parent=network_section,
         )
         self.network_panel.navigate_requested.connect(
@@ -1059,6 +1065,69 @@ class ExplorerWindow(QMainWindow):
             return
 
         QTimer.singleShot(1000, lambda: self._poll_for_ssh_mount(mount_path))
+
+    def add_ftp_network_location(self) -> None:
+        dialog = FtpLocationDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        values = dialog.values()
+        server = str(values["server"])
+        port = int(values["port"])
+        folder = str(values["folder"])
+        username = str(values["username"])
+        password = str(values["password"])
+
+        process, mount_path, error = start_ftp_mount(
+            server=server,
+            port=port,
+            folder=folder,
+            username=username,
+            password=password,
+        )
+        if error is not None or process is None:
+            QMessageBox.warning(
+                self,
+                "Add FTP Network Location",
+                error or "Could not start curlftpfs.",
+            )
+            return
+
+        self._ftp_mount_process = process
+        self._ftp_mount_path = mount_path
+        self._ftp_mount_poll_attempts = 0
+        self.status.showMessage(
+            "Connecting to FTP network location...",
+            6000,
+        )
+        self._poll_for_ftp_mount(mount_path)
+
+    def _poll_for_ftp_mount(self, mount_path: Path) -> None:
+        if os.path.ismount(mount_path):
+            self.network_panel.refresh_shares()
+            self.navigate_to(str(mount_path), record_history=True)
+            self.status.showMessage("FTP network location connected", 3000)
+            return
+
+        process = self._ftp_mount_process
+        if process is not None and process.poll() is not None:
+            QMessageBox.warning(
+                self,
+                "Add FTP Network Location",
+                "curlftpfs exited before the location was mounted. Check the server, credentials, and curlftpfs installation.",
+            )
+            return
+
+        self._ftp_mount_poll_attempts += 1
+        if self._ftp_mount_poll_attempts >= 30:
+            QMessageBox.warning(
+                self,
+                "Add FTP Network Location",
+                "The FTP location was not mounted within 30 seconds.",
+            )
+            return
+
+        QTimer.singleShot(1000, lambda: self._poll_for_ftp_mount(mount_path))
 
     def connect_network_share(self, share_url: str | None = None) -> None:
         connection_credentials: tuple[str, str, bool] | None = None

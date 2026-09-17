@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWid
 
 from .ui_theme import XPIconProvider
 from .ssh_mount import unmount_ssh_path
+from .ftp_mount import unmount_ftp_path
 
 
 _WINDOWS_KNOWN_SHARES_KEY = "network/known_windows_shares"
@@ -39,7 +40,7 @@ def get_mounted_network_shares() -> list[tuple[str, str, str]]:
         lower = line.lower()
         if not any(
             t in lower
-            for t in ("smbfs", "nfs", "afpfs", "cifs", "webdav", "fuse", "sshfs")
+            for t in ("smbfs", "nfs", "afpfs", "cifs", "webdav", "fuse", "sshfs", "curlftpfs", "ftp")
         ):
             continue
         source, rest = line.split(" on ", 1)
@@ -137,6 +138,10 @@ def _get_windows_network_shares() -> list[tuple[str, str, str]]:
 
 
 def _mounted_source_to_url(source: str, lower_mount_line: str) -> str:
+    if "curlftpfs" in lower_mount_line or source.lower().startswith("curlftpfs#"):
+        ftp_source = source.split("#", 1)[-1]
+        return ftp_source if "://" in ftp_source else f"ftp://{ftp_source}"
+
     if "fuse" in lower_mount_line or "sshfs" in lower_mount_line:
         return f"ssh://{source}"
 
@@ -185,6 +190,8 @@ def unmount_share(mount_path: str) -> bool:
     """Unmount a network share by its local mount path."""
     if "ssh_mounts" in mount_path:
         return unmount_ssh_path(mount_path)
+    if "ftp_mounts" in mount_path:
+        return unmount_ftp_path(mount_path)
 
     if os.name == "nt":
         try:
@@ -285,11 +292,13 @@ class NetworkPanel(QTreeWidget):
         self,
         connect_callback: Callable[[], None],
         ssh_callback: Callable[[], None],
+        ftp_callback: Callable[[], None],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._connect_callback = connect_callback
         self._ssh_callback = ssh_callback
+        self._ftp_callback = ftp_callback
         self._settings = QSettings("WinFileXP", "WinFileXP")
         self._known_windows_shares = self._load_known_windows_shares()
         style = QApplication.style()
@@ -358,7 +367,8 @@ class NetworkPanel(QTreeWidget):
         menu = QMenu(self)
         add_location_menu = QMenu("Add Network Location", menu)
         add_location_menu.addAction("Windows Share (SMB)...", self._connect_callback)
-        add_location_menu.addAction("SSH...", self._ssh_callback)
+        add_location_menu.addAction("SSH / SFTP...", self._ssh_callback)
+        add_location_menu.addAction("FTP...", self._ftp_callback)
 
         if item is None:
             menu.addMenu(add_location_menu)
