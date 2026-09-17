@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -315,4 +316,71 @@ class FtpLocationDialog(QDialog):
             "folder": self.folder_edit.text().strip(),
             "username": self.username_edit.text().strip(),
             "password": self.password_edit.text(),
+        }
+
+
+class FtpShareDialog(QDialog):
+    def __init__(self, default_share_name: str, parent: QMainWindow | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("FTP Share")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.share_name_edit = QLineEdit(self)
+        self.share_name_edit.setText(default_share_name)
+        form.addRow("Share Name:", self.share_name_edit)
+
+        self.port_edit = QSpinBox(self)
+        self.port_edit.setRange(1, 65535)
+        self.port_edit.setValue(2121)
+        form.addRow("Port:", self.port_edit)
+
+        self.username_edit = QLineEdit(self)
+        self.username_edit.setPlaceholderText("anonymous if blank")
+        form.addRow("User Name:", self.username_edit)
+
+        self.password_edit = QLineEdit(self)
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        form.addRow("Password:", self.password_edit)
+
+        self.read_only_check = QCheckBox("Read-only (recommended)", self)
+        self.read_only_check.setChecked(True)
+        form.addRow("", self.read_only_check)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(self)
+        buttons.addButton("Cancel", QDialogButtonBox.RejectRole)
+        self.share_button = buttons.addButton("Share", QDialogButtonBox.AcceptRole)
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.share_name_edit.setFocus()
+        self.share_name_edit.selectAll()
+
+    def _accept_if_valid(self) -> None:
+        if not self.share_name_edit.text().strip():
+            QMessageBox.warning(self, "FTP Share", "Enter a share name.")
+            self.share_name_edit.setFocus()
+            return
+        if self.username_edit.text().strip() and not self.password_edit.text():
+            QMessageBox.warning(
+                self,
+                "FTP Share",
+                "Enter a password for the user name, or clear the user name for anonymous access.",
+            )
+            self.password_edit.setFocus()
+            return
+        self.accept()
+
+    def values(self) -> dict[str, str | int | bool]:
+        return {
+            "share_name": self.share_name_edit.text().strip(),
+            "port": self.port_edit.value(),
+            "username": self.username_edit.text().strip(),
+            "password": self.password_edit.text(),
+            "read_only": self.read_only_check.isChecked(),
         }

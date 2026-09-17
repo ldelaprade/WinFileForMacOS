@@ -31,6 +31,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction,
+    QCloseEvent,
     QColor,
     QDesktopServices,
     QIcon,
@@ -74,6 +75,7 @@ from .dialogs import (
     DeleteConfirmDialog,
     SshLocationDialog,
     FtpLocationDialog,
+    FtpShareDialog,
     WindowsShareDialog,
     build_delete_confirmation_message,
     build_move_confirmation_message,
@@ -88,6 +90,7 @@ from .network_panel import (
 )
 from .ssh_mount import start_ssh_mount
 from .ftp_mount import start_ftp_mount
+from .ftp_server import FtpShare, ftp_server_available
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
 from .thumbnail_previews import ThumbnailPreviewProvider
@@ -167,6 +170,7 @@ class ExplorerWindow(QMainWindow):
         self._ftp_mount_poll_attempts = 0
         self._ftp_mount_process: subprocess.Popen[bytes] | None = None
         self._ftp_mount_path: Path | None = None
+        self._ftp_shares: dict[str, FtpShare] = {}
         self._thumbnail_render_token = 0
         self._thumbnail_pending_items: list[tuple[QListWidgetItem, str]] = []
         self._thumbnail_pending_index = 0
@@ -570,6 +574,12 @@ class ExplorerWindow(QMainWindow):
             return
         self.request_navigate(path, record_history=True)
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        for share in list(self._ftp_shares.values()):
+            share.stop()
+        self._ftp_shares.clear()
+        super().closeEvent(event)
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.KeyPress:
             key = event.key()
@@ -770,8 +780,61 @@ class ExplorerWindow(QMainWindow):
                 menu.addSeparator()
                 menu.addAction("Open", lambda current_path=path: self.navigate_to(current_path, record_history=True))
                 menu.addAction("Remove", lambda current_path=path: self._remove_favorite_path(current_path))
+                menu.addSeparator()
+                if path in self._ftp_shares:
+                    menu.addAction("Stop FTP Share", lambda current_path=path: self._stop_ftp_share(current_path))
+                else:
+                    menu.addAction("FTP Share...", lambda current_path=path: self._start_ftp_share(current_path))
 
         menu.exec(self.favorites_view.viewport().mapToGlobal(pos))
+
+    def _start_ftp_share(self, path: str) -> None:
+        if not os.path.isdir(path):
+            QMessageBox.warning(self, "FTP Share", f"Folder not found:\n{path}")
+            return
+
+        if not ftp_server_available():
+            QMessageBox.warning(
+                self,
+                "FTP Share",
+                "pyftpdlib is not installed.\nInstall it with: pip install pyftpdlib",
+            )
+            return
+
+        dialog = FtpShareDialog(Path(path).name or path, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        values = dialog.values()
+        share = FtpShare(
+            path=path,
+            share_name=str(values["share_name"]),
+            port=int(values["port"]),
+            username=str(values["username"]),
+            password=str(values["password"]),
+            read_only=bool(values["read_only"]),
+        )
+        error = share.start()
+        if error is not None:
+            QMessageBox.warning(self, "FTP Share", f"Could not start FTP share:\n{error}")
+            return
+
+        self._ftp_shares[path] = share
+        self._refresh_favorites_view()
+        QMessageBox.information(
+            self,
+            "FTP Share",
+            f"Sharing '{share.share_name}' at:\n{share.url}\n\nOther devices on this network can connect using an FTP client.",
+        )
+        self.status.showMessage(f"FTP sharing '{share.share_name}' on port {share.port}", 4000)
+
+    def _stop_ftp_share(self, path: str) -> None:
+        share = self._ftp_shares.pop(path, None)
+        if share is None:
+            return
+        share.stop()
+        self._refresh_favorites_view()
+        self.status.showMessage(f"Stopped FTP share '{share.share_name}'", 3000)
 
     def _show_file_system_context_menu(self, pos: QPoint) -> None:
         index = self.tree_view.indexAt(pos)
@@ -872,12 +935,40 @@ class ExplorerWindow(QMainWindow):
     def _refresh_favorites_view(self) -> None:
         self.favorites_view.clear()
         icon = self.fs_model.iconProvider().icon(QFileIconProvider.Folder)
+        shared_icon = self._build_shared_folder_icon(icon)
         for path in self._favorite_paths:
             item = QListWidgetItem(path)
             item.setData(Qt.UserRole, path)
             item.setToolTip(path)
-            item.setIcon(icon)
+            item.setIcon(shared_icon if path in self._ftp_shares else icon)
             self.favorites_view.addItem(item)
+
+    @staticmethod
+    def _build_shared_folder_icon(base_icon: QIcon) -> QIcon:
+        size = QSize(18, 16)
+        pixmap = base_icon.pixmap(size)
+        canvas = QPixmap(size)
+        canvas.fill(Qt.transparent)
+
+        painter = QPainter(canvas)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # Small globe badge (top-right) marks a folder as FTP-shared.
+        badge = QRectF(canvas.width() - 10, -1, 10, 10)
+        painter.setPen(QPen(QColor("#1c5faa"), 1))
+        painter.setBrush(QColor("#4da3ff"))
+        painter.drawEllipse(badge)
+
+        painter.setPen(QPen(QColor("#eaf4ff"), 1))
+        painter.drawLine(
+            QPointF(badge.left() + 1, badge.center().y()),
+            QPointF(badge.right() - 1, badge.center().y()),
+        )
+        painter.drawEllipse(badge.adjusted(2.6, 0, -2.6, 0))
+        painter.end()
+
+        return QIcon(canvas)
 
     def _add_favorite_path(self, path: str, persist: bool = True) -> bool:
         normalized = os.path.abspath(os.path.expanduser(path.strip()))
@@ -908,6 +999,7 @@ class ExplorerWindow(QMainWindow):
         self.status.showMessage("Already in Favorites", 1600)
 
     def _remove_favorite_path(self, path: str) -> None:
+        self._stop_ftp_share(path)
         key = os.path.normcase(path)
         self._favorite_paths = [
             existing_path
@@ -2363,6 +2455,13 @@ def run() -> None:
             if window in self._windows:
                 self._windows.remove(window)
 
+        def stop_all_ftp_shares(self) -> None:
+            for window in list(self._windows):
+                for share in list(window._ftp_shares.values()):
+                    share.stop()
+                window._ftp_shares.clear()
+
     window_manager = _WindowManager()
     window_manager.create_window()
+    app.aboutToQuit.connect(window_manager.stop_all_ftp_shares)
     app.exec()
