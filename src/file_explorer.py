@@ -1142,8 +1142,8 @@ class ExplorerWindow(QMainWindow):
             folder = values["folder"].strip().strip("/\\")
             target_url = f"smb://{server}/{share}"
             if folder:
-                target_url = f"{target_url}/{folder.replace('\\', '/')}"
-
+                folder = folder.replace("\\", "/")
+                target_url = f"{target_url}/{folder}"
             username = values["username"]
             password = values["password"]
             domain = values["domain"]
