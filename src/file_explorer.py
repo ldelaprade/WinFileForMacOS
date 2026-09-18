@@ -16,6 +16,7 @@ import math
 from PySide6.QtCore import (
     QDir,
     QEvent,
+    QLockFile,
     QModelIndex,
     QObject,
     QPoint,
@@ -2464,6 +2465,12 @@ class ExplorerWindow(QMainWindow):
 
 def run() -> None:
     app = QApplication([])
+    instance_lock = QLockFile(
+        str(Path(QDir.tempPath()) / "WinFileXP.instance.lock")
+    )
+    if not instance_lock.tryLock(0):
+        return
+
     app.setApplicationName("WinFile")
     app.setStyle("Fusion")
     app.setStyleSheet(xp_stylesheet())

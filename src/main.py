@@ -1,3 +1,7 @@
+import multiprocessing
+
+multiprocessing.freeze_support()
+
 try:
     from .file_explorer import run
 except ImportError:
