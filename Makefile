@@ -4,6 +4,10 @@ run:
 # ── Configuration ────────────────────────────────────────────────────────────
 APP_NAME      := WinFileXP
 APP_BUNDLE    := dist/$(APP_NAME).app
+DEB_VERSION   ?= 1.0.0
+DEB_ARCH      := $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
+DEB_NAME      := dist/$(APP_NAME)_$(DEB_VERSION)_$(DEB_ARCH).deb
+DEB_STAGE     := dist/.deb-stage
 DMG_NAME      := dist/$(APP_NAME).dmg
 DMG_STAGE     := dist/.dmg-stage
 ENTRY         := src/main.py
@@ -16,7 +20,7 @@ DEV_ID        ?= Developer ID Application: Your Name (TEAMID)
 PROFILE       ?= notarytool-profile
 BUNDLE_ID     ?= com.yourname.explorer
 
-.PHONY: all build unsigned-dmg build-debug trace-debug release dmg notarize staple build-linux build-windows clean clean-all
+.PHONY: all build unsigned-dmg build-debug trace-debug release dmg notarize staple build-linux build-deb build-windows clean clean-all
 
 all: build
 
@@ -60,6 +64,38 @@ build-linux:
 	@echo
 	@echo "Built Linux executable: dist/$(APP_NAME)"
 	@echo "Run: ./dist/$(APP_NAME)"
+
+# ── Ubuntu/Debian package ────────────────────────────────────────────────────
+build-deb: build-linux
+	@command -v dpkg-deb >/dev/null 2>&1 || (echo "dpkg-deb is required to build an Ubuntu package." && exit 1)
+	@rm -rf "$(DEB_STAGE)" "$(DEB_NAME)"
+	@mkdir -p "$(DEB_STAGE)/DEBIAN" "$(DEB_STAGE)/opt/$(APP_NAME)" "$(DEB_STAGE)/usr/share/applications"
+	@cp "dist/$(APP_NAME)" "$(DEB_STAGE)/opt/$(APP_NAME)/$(APP_NAME)"
+	@chmod 755 "$(DEB_STAGE)/opt/$(APP_NAME)/$(APP_NAME)"
+	@printf '%s\n' \
+		'Package: winfilexp' \
+		'Version: $(DEB_VERSION)' \
+		'Section: utils' \
+		'Priority: optional' \
+		'Architecture: $(DEB_ARCH)' \
+		'Maintainer: WinFileXP contributors' \
+		'Description: Windows XP-style file explorer' \
+		' A dual-pane file manager built with Python and PySide6.' \
+		> "$(DEB_STAGE)/DEBIAN/control"
+	@printf '%s\n' \
+		'[Desktop Entry]' \
+		'Name=WinFileXP' \
+		'Comment=Windows XP-style file explorer' \
+		'Exec=/opt/$(APP_NAME)/$(APP_NAME)' \
+		'Terminal=false' \
+		'Type=Application' \
+		'Categories=Utility;FileManager;' \
+		> "$(DEB_STAGE)/usr/share/applications/winfilexp.desktop"
+	@dpkg-deb --build "$(DEB_STAGE)" "$(DEB_NAME)" >/dev/null
+	@rm -rf "$(DEB_STAGE)"
+	@echo
+	@echo "Built Ubuntu/Debian package: $(DEB_NAME)"
+	@echo "Install with: sudo apt install ./$(DEB_NAME)"
 
 # ── Windows build ──────────────────────────────────────────────────────────────
 build-windows:

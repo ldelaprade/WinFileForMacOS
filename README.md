@@ -80,6 +80,27 @@ If it still exits, check:
 
 Note: `make build` and `make trace-debug` now prefer `.venv/bin/python` when available, so GUI dependencies like `PySide6` are included from your project environment.
 
+### Ubuntu/Debian installer
+
+On Ubuntu or another Debian-based Linux distribution, build a native `.deb` package:
+
+```bash
+make build-deb
+sudo apt install ./dist/WinFileXP_1.0.0_amd64.deb
+```
+
+The package installs the application under `/opt/WinFileXP` and adds **WinFileXP** to the desktop application menu. Set a different package version when needed:
+
+```bash
+make build-deb DEB_VERSION=1.1.0
+```
+
+To remove it later:
+
+```bash
+sudo apt remove winfilexp
+```
+
 ### Signed + notarized release (for sharing)
 
 Requirements before running:

@@ -45,8 +45,8 @@ def get_mounted_network_shares() -> list[tuple[str, str, str]]:
             continue
         source, rest = line.split(" on ", 1)
         mount_path = rest.strip().split(" ")[0]
-        display = mount_path.rsplit("/", 1)[-1] or mount_path
         source_url = _mounted_source_to_url(source.strip(), lower)
+        display = _network_share_display_name(mount_path, source_url)
         shares.append((display, mount_path, source_url))
     return shares
 
@@ -170,6 +170,17 @@ def _mounted_source_to_url(source: str, lower_mount_line: str) -> str:
         return source
 
     return source
+
+
+def _network_share_display_name(mount_path: str, source_url: str) -> str:
+    parsed = urlparse(source_url)
+    if parsed.scheme in {"ftp", "ftps"} and parsed.hostname:
+        location = parsed.hostname
+        if parsed.port and parsed.port != 21:
+            location = f"{location}:{parsed.port}"
+        folder = unquote(parsed.path).strip("/")
+        return f"FTP: {location}/{folder}" if folder else f"FTP: {location}"
+    return mount_path.rsplit("/", 1)[-1] or mount_path
 
 
 def mount_smb_share(smb_url: str) -> bool:

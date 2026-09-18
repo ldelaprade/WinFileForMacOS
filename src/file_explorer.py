@@ -89,7 +89,7 @@ from .network_panel import (
     unmount_share,
 )
 from .ssh_mount import start_ssh_mount
-from .ftp_mount import start_ftp_mount
+from .ftp_mount import ftp_mount_error, start_ftp_mount
 from .ftp_server import FtpShare, ftp_server_available
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
@@ -1203,10 +1203,14 @@ class ExplorerWindow(QMainWindow):
 
         process = self._ftp_mount_process
         if process is not None and process.poll() is not None:
+            detail = ftp_mount_error(process)
+            message = "curlftpfs exited before the location was mounted."
+            if detail:
+                message = f"{message}\n\n{detail}"
             QMessageBox.warning(
                 self,
                 "Add FTP Network Location",
-                "curlftpfs exited before the location was mounted. Check the server, credentials, and curlftpfs installation.",
+                message,
             )
             return
 
