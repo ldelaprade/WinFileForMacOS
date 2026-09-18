@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import threading
 from collections import deque
 import subprocess
 from collections.abc import Callable
@@ -90,7 +91,7 @@ from .network_panel import (
 )
 from .ssh_mount import start_ssh_mount
 from .ftp_mount import ftp_mount_error, start_ftp_mount
-from .ftp_server import FtpShare, ftp_server_available
+from .ftp_server import FtpShare, ftp_server_available, is_local_host
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
 from .thumbnail_previews import ThumbnailPreviewProvider
@@ -1170,6 +1171,15 @@ class ExplorerWindow(QMainWindow):
         username = str(values["username"])
         password = str(values["password"])
 
+        if is_local_host(server) and any(share.port == port for share in self._ftp_shares.values()):
+            QMessageBox.warning(
+                self,
+                "Add FTP Network Location",
+                "That address points to an FTP share this app is already serving.\n"
+                "Open the shared folder directly from Favorites instead of mounting it over FTP.",
+            )
+            return
+
         process, mount_path, error = start_ftp_mount(
             server=server,
             port=port,
@@ -1195,7 +1205,27 @@ class ExplorerWindow(QMainWindow):
         self._poll_for_ftp_mount(mount_path)
 
     def _poll_for_ftp_mount(self, mount_path: Path) -> None:
-        if os.path.ismount(mount_path):
+        # os.path.ismount() can block indefinitely on a stuck FUSE mount (e.g. a
+        # self-referential loopback share); check it on a daemon thread so a stall
+        # there can never freeze the UI's Qt event loop.
+        result_box: dict[str, bool] = {}
+
+        def check_mounted() -> None:
+            try:
+                result_box["mounted"] = os.path.ismount(mount_path)
+            except OSError:
+                result_box["mounted"] = False
+            result_box["done"] = True
+
+        threading.Thread(target=check_mounted, daemon=True).start()
+        self._await_ftp_mount_check(mount_path, result_box)
+
+    def _await_ftp_mount_check(self, mount_path: Path, result_box: dict[str, bool]) -> None:
+        if not result_box.get("done"):
+            QTimer.singleShot(200, lambda: self._await_ftp_mount_check(mount_path, result_box))
+            return
+
+        if result_box.get("mounted"):
             self.network_panel.refresh_shares()
             self.navigate_to(str(mount_path), record_history=True)
             self.status.showMessage("FTP network location connected", 3000)

@@ -6,6 +6,7 @@ import threading
 try:
     from pyftpdlib.authorizers import DummyAuthorizer
     from pyftpdlib.handlers import FTPHandler
+    from pyftpdlib.ioloop import IOLoop
     from pyftpdlib.servers import FTPServer as _FTPServer
 
     _PYFTPDLIB_AVAILABLE = True
@@ -24,6 +25,22 @@ def local_ip_address() -> str:
             return sock.getsockname()[0]
     except OSError:
         return "127.0.0.1"
+
+
+def is_local_host(host: str) -> bool:
+    """True when host refers to this machine (loopback, hostname, or local IP)."""
+    candidate = host.strip().lower()
+    if not candidate:
+        return False
+    if candidate in ("127.0.0.1", "localhost", "::1"):
+        return True
+    if candidate == local_ip_address():
+        return True
+    try:
+        resolved = socket.gethostbyname(candidate)
+    except OSError:
+        return False
+    return resolved in ("127.0.0.1", local_ip_address())
 
 
 class FtpShare:
@@ -64,7 +81,9 @@ class FtpShare:
             handler.authorizer = authorizer
             handler.banner = f"WinFileXP FTP Share: {self.share_name}"
 
-            self._server = _FTPServer(("0.0.0.0", self.port), handler)
+            # Dedicated IOLoop: pyftpdlib defaults to a shared process-wide IOLoop.instance(),
+            # which is not safe to poll/close from more than one server thread at once.
+            self._server = _FTPServer(("0.0.0.0", self.port), handler, ioloop=IOLoop.factory())
         except OSError as error:
             return str(error)
 
