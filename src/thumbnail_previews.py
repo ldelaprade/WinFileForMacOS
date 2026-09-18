@@ -265,14 +265,25 @@ class ThumbnailPreviewProvider:
         return QImage()
 
     def _thumbnail_fallback_icon(self, path: str, icon_size: QSize) -> QIcon:
-        native_icon = self.native_icon_provider.icon(QFileInfo(path))
-        native_pixmap = native_icon.pixmap(icon_size)
-        if not native_pixmap.isNull():
-            return self.icon_from_preview_image(native_pixmap.toImage(), icon_size)
+        if not self._is_on_windows_ftp_mount(path):
+            native_icon = self.native_icon_provider.icon(QFileInfo(path))
+            native_pixmap = native_icon.pixmap(icon_size)
+            if not native_pixmap.isNull():
+                return self.icon_from_preview_image(native_pixmap.toImage(), icon_size)
 
         suffix = Path(path).suffix.upper().lstrip(".")
         label = (suffix[:4] if suffix else "FILE")
         return self._draw_generic_file_icon(icon_size, label)
+
+    @staticmethod
+    def _is_on_windows_ftp_mount(path: str) -> bool:
+        # SHGetFileInfo icon extraction on an rclone/WinFsp FTP drive can crash
+        # Explorer's COM Surrogate (dllhost.exe), so skip it for those paths.
+        if sys.platform != "win32":
+            return False
+        from .ftp_mount import is_path_on_windows_ftp_mount
+
+        return is_path_on_windows_ftp_mount(path)
 
     def _thumbnail_folder_icon(self, path: str, icon_size: QSize) -> QIcon:
         return self._draw_generic_folder_icon(icon_size)

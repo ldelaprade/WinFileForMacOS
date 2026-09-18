@@ -90,7 +90,7 @@ from .network_panel import (
     unmount_share,
 )
 from .ssh_mount import start_ssh_mount
-from .ftp_mount import ftp_mount_error, start_ftp_mount
+from .ftp_mount import ftp_mount_error, is_ftp_mount_ready, start_ftp_mount
 from .ftp_server import FtpShare, ftp_server_available, is_local_host
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
@@ -1212,7 +1212,7 @@ class ExplorerWindow(QMainWindow):
 
         def check_mounted() -> None:
             try:
-                result_box["mounted"] = os.path.ismount(mount_path)
+                result_box["mounted"] = is_ftp_mount_ready(mount_path)
             except OSError:
                 result_box["mounted"] = False
             result_box["done"] = True
@@ -1234,7 +1234,8 @@ class ExplorerWindow(QMainWindow):
         process = self._ftp_mount_process
         if process is not None and process.poll() is not None:
             detail = ftp_mount_error(process)
-            message = "curlftpfs exited before the location was mounted."
+            tool_name = "rclone" if sys.platform == "win32" else "curlftpfs"
+            message = f"{tool_name} exited before the location was mounted."
             if detail:
                 message = f"{message}\n\n{detail}"
             QMessageBox.warning(

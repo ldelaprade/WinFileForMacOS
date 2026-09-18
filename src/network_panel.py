@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWid
 
 from .ui_theme import XPIconProvider
 from .ssh_mount import unmount_ssh_path
-from .ftp_mount import unmount_ftp_path
+from .ftp_mount import active_windows_ftp_mounts, is_windows_ftp_mount, unmount_ftp_path
 
 
 _WINDOWS_KNOWN_SHARES_KEY = "network/known_windows_shares"
@@ -88,7 +88,16 @@ def normalize_network_share_input(raw_input: str) -> str:
 
 
 def _get_windows_network_shares() -> list[tuple[str, str, str]]:
-    """Return active Windows network shares from `net use` output."""
+    """Return active Windows network shares from `net use` output, plus any
+    FTP locations mounted via rclone (which `net use` doesn't know about)."""
+    shares: list[tuple[str, str, str]] = []
+    seen_paths: set[str] = set()
+
+    for mount_path, source_url in active_windows_ftp_mounts():
+        display = _network_share_display_name(mount_path, source_url)
+        shares.append((display, mount_path, source_url))
+        seen_paths.add(mount_path.lower())
+
     try:
         result = subprocess.run(
             ["net", "use"],
@@ -98,13 +107,10 @@ def _get_windows_network_shares() -> list[tuple[str, str, str]]:
             check=False,
         )
     except OSError:
-        return []
+        return shares
 
     if result.returncode != 0:
-        return []
-
-    shares: list[tuple[str, str, str]] = []
-    seen_paths: set[str] = set()
+        return shares
 
     # Example lines include mapped and unmapped entries, e.g.:
     # OK           Z:        \\server\share          Microsoft Windows Network
@@ -201,7 +207,7 @@ def unmount_share(mount_path: str) -> bool:
     """Unmount a network share by its local mount path."""
     if "ssh_mounts" in mount_path:
         return unmount_ssh_path(mount_path)
-    if "ftp_mounts" in mount_path:
+    if "ftp_mounts" in mount_path or is_windows_ftp_mount(mount_path):
         return unmount_ftp_path(mount_path)
 
     if os.name == "nt":

@@ -104,7 +104,7 @@ build-windows:
 	            --onefile \
 	            --name "$(APP_NAME)" \
 	            --noconfirm \
-	            --icon none \
+	            --icon NONE \
 	            $(ENTRY)
 	@echo
 	@echo "Built Windows executable: dist/$(APP_NAME).exe"
