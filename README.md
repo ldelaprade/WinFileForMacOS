@@ -58,7 +58,7 @@ Outputs `dist/WinFileXP.app`. Drag to `/Applications` or `open dist/WinFileXP.ap
 
 To package an unsigned DMG without an Apple Developer certific
 ```bash
-make unsi
+make unsigned-dmg
 ```
 
 This creates `dist/WinFileXP.dmg` using `hdiutil` (or `create-dmg` if installed).
