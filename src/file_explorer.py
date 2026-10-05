@@ -1774,7 +1774,37 @@ class ExplorerWindow(QMainWindow):
     def open_terminal(self) -> None:
         current_path = self.current_path()
         try:
-            os.system(f'open -a Terminal.app "{current_path}"')
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-a", "Terminal.app", current_path])
+            elif sys.platform == "win32":
+                windows_terminal = shutil.which("wt.exe")
+                if windows_terminal:
+                    subprocess.Popen(
+                        [windows_terminal, "-d", current_path],
+                        cwd=current_path,
+                    )
+                else:
+                    subprocess.Popen(["cmd.exe"], cwd=current_path)
+            elif sys.platform.startswith("linux"):
+                terminal = next(
+                    (
+                        shutil.which(name)
+                        for name in (
+                            "x-terminal-emulator",
+                            "gnome-terminal",
+                            "konsole",
+                            "xfce4-terminal",
+                            "xterm",
+                        )
+                        if shutil.which(name)
+                    ),
+                    None,
+                )
+                if terminal is None:
+                    raise FileNotFoundError("No supported terminal emulator was found.")
+                subprocess.Popen([terminal], cwd=current_path)
+            else:
+                raise OSError(f"Opening a terminal is not supported on {sys.platform}.")
         except OSError as error:
             QMessageBox.critical(self, "Open Terminal failed", str(error))
 
