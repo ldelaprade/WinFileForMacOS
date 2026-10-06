@@ -5,7 +5,11 @@ run:
 APP_NAME      := WinFileXP
 APP_BUNDLE    := dist/$(APP_NAME).app
 DEB_VERSION   ?= 1.0.0
+ifeq ($(OS),Windows_NT)
+DEB_ARCH      ?= amd64
+else
 DEB_ARCH      := $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
+endif
 DEB_NAME      := dist/$(APP_NAME)_$(DEB_VERSION)_$(DEB_ARCH).deb
 DEB_STAGE     := dist/.deb-stage
 DMG_NAME      := dist/$(APP_NAME).dmg
@@ -104,7 +108,8 @@ build-windows:
 	            --onefile \
 	            --name "$(APP_NAME)" \
 	            --noconfirm \
-	            --icon NONE \
+	            --icon "resources/icons/application/windows/application.ico" \
+	            --add-data "resources/icons/application/windows/application.ico:resources/icons/application/windows" \
 	            $(ENTRY)
 	@echo
 	@echo "Built Windows executable: dist/$(APP_NAME).exe"
@@ -157,10 +162,20 @@ staple:
 	xcrun stapler staple "$(DMG_NAME)"
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
+ifeq ($(OS),Windows_NT)
+clean:
+	powershell.exe -NoProfile -Command "$$ErrorActionPreference = 'Stop'; Get-ChildItem -LiteralPath . -Directory -Recurse -Force -Filter '__pycache__' | Remove-Item -Recurse -Force"
+	powershell.exe -NoProfile -Command "$$ErrorActionPreference = 'Stop'; Get-ChildItem -LiteralPath . -File -Recurse -Force | Where-Object { $$_.Extension -in @('.pyc','.pyo') } | Remove-Item -Force"
+	powershell.exe -NoProfile -Command "$$ErrorActionPreference = 'Stop'; foreach ($$path in @('.pytest_cache','.mypy_cache','.ruff_cache')) { if (Test-Path -LiteralPath $$path) { Remove-Item -LiteralPath $$path -Recurse -Force } }"
+
+clean-all: clean
+	powershell.exe -NoProfile -Command "$$ErrorActionPreference = 'Stop'; foreach ($$path in @('build','dist')) { if (Test-Path -LiteralPath $$path) { Remove-Item -LiteralPath $$path -Recurse -Force } }"
+else
 clean:
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
 	find . -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
 	rm -rf .pytest_cache .mypy_cache .ruff_cache
 
 clean-all: clean
-	rm -rf build dist *.spec
+	rm -rf build dist
+endif

@@ -118,5 +118,8 @@ This runs: build → sign → dmg → notarize → staple. Outputs `dist/WinFile
 
 ```bash
 make clean      # remove Python caches
-make clean-all  # also remove build/ dist/ *.spec
+make clean-all  # also remove build/ and dist/
 ```
+
+Cleanup supports Windows PowerShell and macOS/Linux. PyInstaller `.spec` files,
+source files, and icon resources are preserved by both targets.

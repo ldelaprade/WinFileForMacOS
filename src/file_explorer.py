@@ -2493,8 +2493,25 @@ class ExplorerWindow(QMainWindow):
         QTimer.singleShot(0, apply_sizes)
 
 
+def _set_application_icon(app: QApplication) -> None:
+    if sys.platform == "win32":
+        import ctypes
+
+        set_app_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        set_app_id.argtypes = [ctypes.c_wchar_p]
+        set_app_id.restype = ctypes.c_long
+        set_app_id("WinFileXP.WinFileXP")
+
+    icon_path = (
+        Path(__file__).resolve().parents[1]
+        / "resources" / "icons" / "application" / "windows" / "application.ico"
+    )
+    app.setWindowIcon(QIcon(str(icon_path)))
+
+
 def run() -> None:
     app = QApplication([])
+    _set_application_icon(app)
     instance_lock = QLockFile(
         str(Path(QDir.tempPath()) / "WinFileXP.instance.lock")
     )
