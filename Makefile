@@ -34,6 +34,7 @@ build:
 	$(PYINSTALLER) --windowed \
 	            --name "$(APP_NAME)" \
 	            --noconfirm \
+	            --icon "resources/icons/application/macos/application.icns" \
 	            $(ENTRY)
 	@echo
 	@echo "Built: $(APP_BUNDLE)"
