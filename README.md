@@ -77,7 +77,15 @@ If it still exits, check:
 - `build/WinFileXP-debug/warn-WinFileXP-debug.txt`
 - `build/WinFileXP-debug/xref-WinFileXP-debug.html`
 
-Note: `make build` and `make trace-debug` now prefer `.venv/bin/python` when available, so GUI dependencies like `PySide6` are included from your project environment.
+Builds automatically check `.venv`, `.venv-*`, then `python3` and `python`, skipping
+candidates that fail the Python 3.10+ and pip-import checks. An older environment
+is not deleted or upgraded. To select an interpreter explicitly, use:
+
+```bash
+make build PYTHON=python3
+```
+
+You can also set `PYTHON` to a supported virtual environment's interpreter path.
 
 ### Ubuntu/Debian installer
 

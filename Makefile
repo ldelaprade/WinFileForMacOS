@@ -16,14 +16,17 @@ DMG_NAME      := dist/$(APP_NAME).dmg
 DMG_STAGE     := dist/.dmg-stage
 ENTRY         := src/main.py
 ifeq ($(OS),Windows_NT)
-PYTHON        ?= $(if $(wildcard .venv/Scripts/python.exe),.venv/Scripts/python.exe,python)
+PYTHON_CANDIDATES := $(wildcard .venv/Scripts/python.exe .venv-*/Scripts/python.exe) python3 python
+PYTHON_NULL   := NUL
 PYINSTALLER_DATA_SEP := ;
 HOST_OS       := Windows
 else
-PYTHON        ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+PYTHON_CANDIDATES := $(wildcard .venv/bin/python .venv-*/bin/python) python3 python
+PYTHON_NULL   := /dev/null
 PYINSTALLER_DATA_SEP := :
 HOST_OS       := $(shell uname -s)
 endif
+PYTHON        ?= $(or $(firstword $(foreach candidate,$(PYTHON_CANDIDATES),$(shell $(candidate) -c "import sys; assert sys.version_info >= (3, 10); from pip._internal.cli.main import main; print('$(candidate)')" 2>$(PYTHON_NULL)))),python)
 PIP           := $(PYTHON) -m pip
 PYINSTALLER   := $(PYTHON) -m PyInstaller
 
@@ -131,7 +134,7 @@ build-windows:
 	            --onefile \
 	            --name "$(APP_NAME)" \
 	            --noconfirm \
-	            --icon "resources/icons/application/windows/application.ico" \
+	            --icon "$(CURDIR)/resources/icons/application/windows/application.ico" \
 	            --add-data "$(CURDIR)/resources/icons/application/windows/application.ico$(PYINSTALLER_DATA_SEP)resources/icons/application/windows" \
 	            --specpath build \
 	            $(ENTRY)
