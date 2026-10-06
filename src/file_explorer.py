@@ -2502,10 +2502,11 @@ def _set_application_icon(app: QApplication) -> None:
         set_app_id.restype = ctypes.c_long
         set_app_id("WinFileXP.WinFileXP")
 
-    icon_path = (
-        Path(__file__).resolve().parents[1]
-        / "resources" / "icons" / "application" / "windows" / "application.ico"
-    )
+    icon_root = Path(__file__).resolve().parents[1] / "resources" / "icons" / "application"
+    if sys.platform == "linux":
+        icon_path = icon_root / "png" / "application-256.png"
+    else:
+        icon_path = icon_root / "windows" / "application.ico"
     app.setWindowIcon(QIcon(str(icon_path)))
 
 

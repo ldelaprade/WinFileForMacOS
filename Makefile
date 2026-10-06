@@ -15,7 +15,15 @@ DEB_STAGE     := dist/.deb-stage
 DMG_NAME      := dist/$(APP_NAME).dmg
 DMG_STAGE     := dist/.dmg-stage
 ENTRY         := src/main.py
+ifeq ($(OS),Windows_NT)
+PYTHON        ?= $(if $(wildcard .venv/Scripts/python.exe),.venv/Scripts/python.exe,python)
+PYINSTALLER_DATA_SEP := ;
+HOST_OS       := Windows
+else
 PYTHON        ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+PYINSTALLER_DATA_SEP := :
+HOST_OS       := $(shell uname -s)
+endif
 PIP           := $(PYTHON) -m pip
 PYINSTALLER   := $(PYTHON) -m PyInstaller
 
@@ -29,6 +37,11 @@ BUNDLE_ID     ?= com.yourname.explorer
 all: build
 
 # ── Local unsigned build ──────────────────────────────────────────────────────
+ifeq ($(HOST_OS),Linux)
+build: build-linux
+else ifeq ($(HOST_OS),Windows)
+build: build-windows
+else
 build:
 	$(PIP) install -q -r requirements.txt pyinstaller
 	$(PYINSTALLER) --windowed \
@@ -39,6 +52,7 @@ build:
 	@echo
 	@echo "Built: $(APP_BUNDLE)"
 	@echo "Drag to /Applications or run: open $(APP_BUNDLE)"
+endif
 
 unsigned-dmg: build dmg
 	@echo "✓ Unsigned DMG ready: $(DMG_NAME)"
@@ -65,6 +79,8 @@ build-linux:
 	            --onefile \
 	            --name "$(APP_NAME)" \
 	            --noconfirm \
+	            --add-data "$(CURDIR)/resources/icons/application/png/application-256.png$(PYINSTALLER_DATA_SEP)resources/icons/application/png" \
+	            --specpath build \
 	            $(ENTRY)
 	@echo
 	@echo "Built Linux executable: dist/$(APP_NAME)"
@@ -75,6 +91,11 @@ build-deb: build-linux
 	@command -v dpkg-deb >/dev/null 2>&1 || (echo "dpkg-deb is required to build an Ubuntu package." && exit 1)
 	@rm -rf "$(DEB_STAGE)" "$(DEB_NAME)"
 	@mkdir -p "$(DEB_STAGE)/DEBIAN" "$(DEB_STAGE)/opt/$(APP_NAME)" "$(DEB_STAGE)/usr/share/applications"
+	@for size in 16 20 24 32 40 48 64 128 256 512; do \
+		icon_dir="$(DEB_STAGE)/usr/share/icons/hicolor/$${size}x$${size}/apps"; \
+		mkdir -p "$$icon_dir"; \
+		cp "resources/icons/application/png/application-$${size}.png" "$$icon_dir/winfilexp.png"; \
+	done
 	@cp "dist/$(APP_NAME)" "$(DEB_STAGE)/opt/$(APP_NAME)/$(APP_NAME)"
 	@chmod 755 "$(DEB_STAGE)/opt/$(APP_NAME)/$(APP_NAME)"
 	@printf '%s\n' \
@@ -92,6 +113,7 @@ build-deb: build-linux
 		'Name=WinFileXP' \
 		'Comment=Windows XP-style file explorer' \
 		'Exec=/opt/$(APP_NAME)/$(APP_NAME)' \
+		'Icon=winfilexp' \
 		'Terminal=false' \
 		'Type=Application' \
 		'Categories=Utility;FileManager;' \
@@ -110,7 +132,8 @@ build-windows:
 	            --name "$(APP_NAME)" \
 	            --noconfirm \
 	            --icon "resources/icons/application/windows/application.ico" \
-	            --add-data "resources/icons/application/windows/application.ico:resources/icons/application/windows" \
+	            --add-data "$(CURDIR)/resources/icons/application/windows/application.ico$(PYINSTALLER_DATA_SEP)resources/icons/application/windows" \
+	            --specpath build \
 	            $(ENTRY)
 	@echo
 	@echo "Built Windows executable: dist/$(APP_NAME).exe"

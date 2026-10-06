@@ -5,8 +5,10 @@ transparent outer padding. No third-party icons are included.
 
 These are application-identity placeholders, not toolbar, folder, file-type,
 network, or status icons. Those are separate optional workstreams. Runtime startup
-loads the ICO for application windows. `make build-windows` embeds it in the EXE
-and includes a copy for runtime loading. macOS/Linux packaging is not wired yet.
+loads the ICO on Windows and a PNG on Linux. `make build-windows` embeds its ICO
+and includes a copy for runtime loading. `make build` on Linux embeds a PNG for
+the application window; Debian packages install PNG sizes and register the
+desktop launcher icon. The macOS build uses the ICNS for the app bundle.
 
 ## Files and Functions
 
@@ -72,7 +74,7 @@ PNG size separately to keep the initial border crisp. Pillow and icnsutil assemb
 the Windows/macOS containers from those PNGs, including small and Retina sizes.
 
 Commit the editable master and generated outputs together. After regenerating,
-run `make build-windows` and close/relaunch the application to see the updated
-Windows icon. Regeneration alone does not change an existing EXE. OS icon caches
-and pinned shortcuts may retain older artwork; refresh Explorer or unpin/re-pin
-the rebuilt application before considering any system-cache troubleshooting.
+rebuild on the target platform and relaunch the application to see the updated
+icon. Regeneration alone does not change an existing executable or app bundle.
+OS icon caches and pinned shortcuts may retain older artwork; refresh the shell
+or reinstall the rebuilt package before considering system-cache troubleshooting.
