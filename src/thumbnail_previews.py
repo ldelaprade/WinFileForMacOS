@@ -360,39 +360,65 @@ class ThumbnailPreviewProvider:
 
         w = icon_size.width()
         h = icon_size.height()
-        body_w = max(88, int(w * 0.82))
-        body_h = max(62, int(h * 0.50))
-        tab_w = max(36, int(body_w * 0.40))
-        tab_h = max(16, int(body_h * 0.30))
+        scale_x = w / 96
+        scale_y = h / 96
+        body_w = int(88 * scale_x)
+        body_h = int(62 * scale_y)
+        tab_w = int(36 * scale_x)
+        tab_h = int(18 * scale_y)
         x = (w - body_w) // 2
-        y = (h - body_h) // 2 + max(4, int(h * 0.03))
-        radius = max(4, int(min(body_w, body_h) * 0.06))
+        y = (h - body_h) // 2 + int(4 * scale_y)
+        radius = max(1, int(4 * min(scale_x, scale_y)))
+        offset_x = int(5 * scale_x)
+        offset_y = int(2 * scale_y)
+        stroke_width = max(1.0, 3 * min(w, h) / 1024)
 
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        # Brighter yellow palette and hairline strokes for a lighter look.
-        painter.setPen(QPen(QColor("#c29b3b"), 0))
+        painter.setPen(QPen(QColor("#c29b3b"), stroke_width))
         painter.setBrush(QColor("#ffe079"))
         painter.drawRoundedRect(x, y, body_w, body_h, radius, radius)
 
-        painter.setPen(QPen(QColor("#c29b3b"), 0))
+        painter.setPen(QPen(QColor("#c29b3b"), stroke_width))
         painter.setBrush(QColor("#fff3c6"))
-        painter.drawRoundedRect(x + 5, y - tab_h + 2, tab_w, tab_h, radius * 0.7, radius * 0.7)
+        painter.drawRoundedRect(
+            x + offset_x,
+            y - tab_h + offset_y,
+            tab_w,
+            tab_h,
+            radius * 0.7,
+            radius * 0.7,
+        )
 
         # Front face for slight depth effect
-        front_h = max(36, int(body_h * 0.64))
+        front_h = int(39 * scale_y)
         front_y = y + body_h - front_h
         # painter.setPen(QPen(QColor("#a3791e"), 2))
         # painter.setBrush(QColor("#f5d05d"))
         # painter.drawRoundedRect(x + 3, front_y, body_w - 6, front_h, radius, radius)
 
         # XP-like highlight and seam lines
-        painter.setPen(QPen(QColor("#fff8dc"), 0))
-        painter.drawLine(x + 8, y + 8, x + body_w - 10, y + 8)
-        painter.setPen(QPen(QColor("#d4ad46"), 0))
-        painter.drawLine(x + 8, front_y + 2, x + body_w - 9, front_y + 2)
-        painter.drawLine(x + 8, front_y + front_h // 2, x + body_w - 9, front_y + front_h // 2)
+        painter.setPen(QPen(QColor("#fff8dc"), stroke_width))
+        painter.drawLine(
+            x + int(8 * scale_x),
+            y + int(8 * scale_y),
+            x + body_w - int(10 * scale_x),
+            y + int(8 * scale_y),
+        )
+        painter.setPen(QPen(QColor("#d4ad46"), stroke_width))
+        painter.drawLine(
+            x + int(8 * scale_x),
+            front_y + int(2 * scale_y),
+            x + body_w - int(9 * scale_x),
+            front_y + int(2 * scale_y),
+        )
+        painter.drawLine(
+            x + int(8 * scale_x),
+            front_y + front_h // 2,
+            x + body_w - int(9 * scale_x),
+            front_y + front_h // 2,
+        )
 
         painter.end()
         return QIcon(canvas)
