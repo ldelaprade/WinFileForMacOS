@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse, urlunparse
 import math
+import platform
 
 
 from PySide6.QtCore import (
     QDir,
     QEvent,
+    QFileInfo,
     QLockFile,
     QModelIndex,
     QObject,
@@ -64,10 +66,13 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QToolBar,
     QToolButton,
     QTreeView,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -82,7 +87,12 @@ from .dialogs import (
     build_delete_confirmation_message,
     build_move_confirmation_message,
 )
-from .dragdrop_views import ConfirmingDropTreeView, FavoritesListWidget, FileDragListWidget
+from .dragdrop_views import (
+    ConfirmingDropTreeView,
+    FavoritesListWidget,
+    FileDragListWidget,
+    MachineTreeWidget,
+)
 from .network_panel import (
     NetworkPanel,
     mount_smb_share,
@@ -95,6 +105,7 @@ from .ftp_mount import ftp_mount_error, is_ftp_mount_ready, start_ftp_mount
 from .ftp_server import FtpShare, ftp_server_available, is_local_host
 from .file_operations import create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
+from .drive_report import DriveReportWidget
 from .thumbnail_previews import ThumbnailPreviewProvider
 from .ui_theme import XPIconProvider, xp_stylesheet
 
@@ -144,6 +155,8 @@ class _ThumbnailPreviewWorker(QRunnable):
 
 class ExplorerWindow(QMainWindow):
     _FAVORITES_SETTINGS_KEY = "favorites/paths"
+    _THIS_PC_HISTORY_ENTRY = "winfilexp://this-pc"
+    _MACHINE_TREE_CHILDREN_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
 
     def __init__(
         self,
@@ -156,6 +169,7 @@ class ExplorerWindow(QMainWindow):
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self._open_new_window_callback = open_new_window_callback
         self._settings = QSettings("WinFileXP", "WinFileXP")
+        self._computer_name = platform.node() or "Computer"
         self._favorite_paths = self._load_favorite_paths()
         if not self._settings.contains(self._FAVORITES_SETTINGS_KEY):
             self._save_favorite_paths()
@@ -164,6 +178,8 @@ class ExplorerWindow(QMainWindow):
         self._clipboard_paths: list[str] = []
         self._clipboard_mode: str | None = None
         self._view_mode: str = "list"  # "list" or "thumbnail"
+        self._showing_this_pc = False
+        self._show_hidden = False
         self.thumbnail_provider: ThumbnailPreviewProvider | None = None
         self._network_poll_attempts = 0
         self._ssh_mount_poll_attempts = 0
@@ -229,16 +245,15 @@ class ExplorerWindow(QMainWindow):
         self.fs_model = QFileSystemModel(self)
         self.fs_model.setReadOnly(False)
         self.fs_model.setFilter(
-            QDir.AllEntries | QDir.NoDotAndDotDot | QDir.AllDirs | QDir.Files
+            QDir.AllEntries
+            | QDir.NoDotAndDotDot
+            | QDir.AllDirs
+            | QDir.Files
+            | QDir.Hidden
         )
         self.fs_model.setIconProvider(icon_provider)
         self.fs_model.setRootPath(str(Path.home()))
         self.fs_model.directoryLoaded.connect(self._on_directory_loaded)
-        self.dir_model = QFileSystemModel(self)
-        self.dir_model.setReadOnly(False)
-        self.dir_model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot)
-        self.dir_model.setIconProvider(icon_provider)
-        self.dir_model.setRootPath(str(Path.home()))
 
     def _setup_views(self) -> None:
         self.splitter = QSplitter(self)
@@ -291,28 +306,41 @@ class ExplorerWindow(QMainWindow):
         local_layout = QVBoxLayout(local_section)
         local_layout.setContentsMargins(0, 0, 0, 0)
         local_layout.setSpacing(4)
-        local_header = QLabel("File System", local_section)
+        local_header = QLabel("Local Machine", local_section)
         local_header.setStyleSheet("font-weight: bold; padding-left: 4px;")
         local_layout.addWidget(local_header)
 
-        self.tree_view = ConfirmingDropTreeView(local_section)
-        self.tree_view.setModel(self.dir_model)
-        self.tree_view.setHeaderHidden(True)
-        self.tree_view.setColumnHidden(1, True)
-        self.tree_view.setColumnHidden(2, True)
-        self.tree_view.setColumnHidden(3, True)
-        self.tree_view.setDragEnabled(True)
-        self.tree_view.setAcceptDrops(True)
-        self.tree_view.setDropIndicatorShown(True)
-        self.tree_view.setDragDropMode(QTreeView.DragDrop)
-        self.tree_view.setDefaultDropAction(Qt.MoveAction)
-        self.tree_view.set_move_confirm_callback(self._confirm_drag_move)
-        self.tree_view.clicked.connect(self._on_tree_clicked)
-        self.tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.tree_view.customContextMenuRequested.connect(self._show_file_system_context_menu)
-        # Disable edit triggers (no rename on Enter or double-click)
-        self.tree_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        local_layout.addWidget(self.tree_view)
+        self.this_pc_view = MachineTreeWidget(local_section)
+        self.this_pc_view.setHeaderHidden(True)
+        self.this_pc_view.setRootIsDecorated(True)
+        self.this_pc_view.setIndentation(16)
+        self.this_pc_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.this_pc_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.this_pc_view.setDragEnabled(True)
+        self.this_pc_view.setAcceptDrops(True)
+        self.this_pc_view.setDropIndicatorShown(True)
+        self.this_pc_view.setDragDropMode(QTreeWidget.DragDropMode.DragDrop)
+        self.this_pc_view.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.this_pc_view.set_drop_target_path_callback(
+            lambda: "" if self._showing_this_pc else self.current_path()
+        )
+        self.this_pc_view.set_file_drop_callback(self._handle_thumbnail_drop)
+        self.this_pc_item = QTreeWidgetItem([self._computer_name])
+        self.this_pc_item.setIcon(
+            0,
+            self.fs_model.iconProvider().icon(QFileIconProvider.Computer),
+        )
+        self.this_pc_view.addTopLevelItem(self.this_pc_item)
+        self.this_pc_item.setExpanded(True)
+        self.this_pc_view.itemClicked.connect(self._on_this_pc_item_clicked)
+        self.this_pc_view.itemActivated.connect(self._on_this_pc_item_clicked)
+        self.this_pc_view.itemExpanded.connect(self._populate_machine_tree_children)
+        self.this_pc_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.this_pc_view.customContextMenuRequested.connect(
+            self._show_file_system_context_menu
+        )
+        self.this_pc_view.installEventFilter(self)
+        local_layout.addWidget(self.this_pc_view, 1)
 
         network_section = QWidget(left_panel)
         network_layout = QVBoxLayout(network_section)
@@ -337,7 +365,8 @@ class ExplorerWindow(QMainWindow):
         self.network_panel.add_to_favorites_requested.connect(self._add_favorite_with_feedback)
         network_layout.addWidget(self.network_panel)
 
-        self.list_view = ConfirmingDropTreeView(self.splitter)
+        self.content_stack = QStackedWidget(self.splitter)
+        self.list_view = ConfirmingDropTreeView(self.content_stack)
         self.list_view.setModel(self.fs_model)
         self.list_view.setRootIsDecorated(False)
         self.list_view.setAlternatingRowColors(True)
@@ -358,6 +387,12 @@ class ExplorerWindow(QMainWindow):
         self.list_view.selectionModel().selectionChanged.connect(
             lambda *_: self._update_status()
         )
+        self.content_stack.addWidget(self.list_view)
+
+        self.drive_report = DriveReportWidget(self.content_stack)
+        self.drive_report.drive_activated.connect(self._on_drive_activated)
+        self.content_stack.addWidget(self.drive_report)
+        self._refresh_machine_tree()
 
         self.thumbnail_view = FileDragListWidget(self.splitter)
         self.thumbnail_view.setViewMode(QListWidget.IconMode)
@@ -379,6 +414,7 @@ class ExplorerWindow(QMainWindow):
             lambda *_: self._update_status()
         )
         self.thumbnail_view.hide()
+        self.content_stack.setCurrentWidget(self.list_view)
 
         self.splitter.setSizes([300, 900, 0])
         self.splitter.setStretchFactor(0, 0)
@@ -390,7 +426,6 @@ class ExplorerWindow(QMainWindow):
         left_panel.setStretchFactor(2, 0)
 
         self.favorites_view.installEventFilter(self)
-        self.tree_view.installEventFilter(self)
         self.network_panel.installEventFilter(self)
 
     def _setup_toolbar(self) -> None:
@@ -532,11 +567,11 @@ class ExplorerWindow(QMainWindow):
         open_enter_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         open_enter_shortcut.activated.connect(self.open_selected)
 
-        tree_return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), self.tree_view)
+        tree_return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), self.this_pc_view)
         tree_return_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         tree_return_shortcut.activated.connect(self._on_tree_enter)
 
-        tree_enter_shortcut = QShortcut(QKeySequence(Qt.Key_Enter), self.tree_view)
+        tree_enter_shortcut = QShortcut(QKeySequence(Qt.Key_Enter), self.this_pc_view)
         tree_enter_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         tree_enter_shortcut.activated.connect(self._on_tree_enter)
 
@@ -558,23 +593,154 @@ class ExplorerWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self.focus_address_bar)
 
     def _on_tree_enter(self) -> None:
-        index = self.tree_view.currentIndex()
-        if index.isValid():
-            self._on_tree_clicked(index)
+        item = self.this_pc_view.currentItem()
+        if item is not None:
+            self._on_this_pc_item_clicked(item)
 
     def _on_favorites_enter(self) -> None:
         item = self.favorites_view.currentItem()
         if item is not None:
             self._on_favorite_activated(item)
 
-    def _on_tree_clicked(self, index: QModelIndex) -> None:
-        if not index.isValid():
+    def _on_this_pc_item_clicked(
+        self,
+        item: QTreeWidgetItem,
+        _column: int = 0,
+    ) -> None:
+        if item is self.this_pc_item:
+            self.show_this_pc()
             return
-        path = self.dir_model.filePath(index)
-        if self._is_app_bundle(path):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path:
+            self.navigate_to(str(path), record_history=True)
+
+    def _refresh_machine_tree(self) -> None:
+        self.this_pc_item.setText(0, self._computer_name)
+        self.this_pc_item.takeChildren()
+        drive_icon = self.fs_model.iconProvider().icon(QFileIconProvider.Drive)
+        for label, path in self.drive_report.drive_entries:
+            drive_item = QTreeWidgetItem([label])
+            drive_item.setIcon(0, drive_icon)
+            drive_item.setData(0, Qt.ItemDataRole.UserRole, path)
+            drive_item.setData(0, self._MACHINE_TREE_CHILDREN_LOADED_ROLE, False)
+            drive_item.setChildIndicatorPolicy(
+                QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+            )
+            self.this_pc_item.addChild(drive_item)
+        self.this_pc_item.setExpanded(True)
+
+    def _populate_machine_tree_children(self, item: QTreeWidgetItem) -> None:
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path or item.data(0, self._MACHINE_TREE_CHILDREN_LOADED_ROLE):
             return
-        self.request_navigate(path, record_history=True)
+
+        item.setData(0, self._MACHINE_TREE_CHILDREN_LOADED_ROLE, True)
+        ancestor_paths: set[str] = set()
+        ancestor = item
+        while ancestor is not None:
+            ancestor_path = ancestor.data(0, Qt.ItemDataRole.UserRole)
+            if ancestor_path:
+                ancestor_paths.add(os.path.normcase(os.path.realpath(str(ancestor_path))))
+            ancestor = ancestor.parent()
+
+        try:
+            with os.scandir(str(path)) as entries:
+                directories = [
+                    entry
+                    for entry in entries
+                    if not self._is_hidden_path(entry.path, entry.name)
+                    and entry.is_dir(follow_symlinks=True)
+                    and not self._is_app_bundle(entry.path)
+                    and os.path.normcase(os.path.realpath(entry.path)) not in ancestor_paths
+                ]
+        except OSError:
+            directories = []
+
+        directories.sort(key=lambda entry: entry.name.casefold())
+        folder_icon = self.fs_model.iconProvider().icon(QFileIconProvider.Folder)
+        for entry in directories:
+            child = QTreeWidgetItem([entry.name])
+            child.setIcon(0, folder_icon)
+            child.setData(0, Qt.ItemDataRole.UserRole, entry.path)
+            child.setData(0, self._MACHINE_TREE_CHILDREN_LOADED_ROLE, False)
+            child.setChildIndicatorPolicy(
+                QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+            )
+            item.addChild(child)
+
+    def _select_machine_path(self, path: str) -> None:
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        selected_item: QTreeWidgetItem | None = None
+        selected_root = ""
+        for index in range(self.this_pc_item.childCount()):
+            item = self.this_pc_item.child(index)
+            root_path = item.data(0, Qt.ItemDataRole.UserRole)
+            if not root_path:
+                continue
+            normalized_root = os.path.normcase(os.path.abspath(str(root_path)))
+            try:
+                common_path = os.path.commonpath((normalized_path, normalized_root))
+            except ValueError:
+                continue
+            if common_path == normalized_root and len(normalized_root) > len(selected_root):
+                selected_item = item
+                selected_root = normalized_root
+        if selected_item is None:
+            selected_item = self.this_pc_item
+            selected_root = ""
+
+        if selected_item is not self.this_pc_item:
+            selected_item.setExpanded(True)
+            self._populate_machine_tree_children(selected_item)
+            try:
+                relative_path = os.path.relpath(normalized_path, selected_root)
+            except ValueError:
+                relative_path = "."
+            for component in relative_path.split(os.sep):
+                if not component or component == ".":
+                    continue
+                next_item = next(
+                    (
+                        selected_item.child(child_index)
+                        for child_index in range(selected_item.childCount())
+                        if os.path.normcase(selected_item.child(child_index).text(0))
+                        == os.path.normcase(component)
+                    ),
+                    None,
+                )
+                if next_item is None:
+                    break
+                selected_item = next_item
+                selected_item.setExpanded(True)
+                self._populate_machine_tree_children(selected_item)
+
+        self.this_pc_view.setCurrentItem(selected_item)
+        if selected_item is not self.this_pc_item and normalized_path == selected_root:
+            self.this_pc_view.scrollToItem(
+                self.this_pc_item,
+                QAbstractItemView.ScrollHint.PositionAtTop,
+            )
+        else:
+            self.this_pc_view.scrollToItem(selected_item)
+
+    def _on_drive_activated(self, path: str) -> None:
+        self.navigate_to(path, record_history=True)
+
+    def show_this_pc(self, record_history: bool = True) -> None:
+        self._showing_this_pc = True
+        self.drive_report.refresh_drives()
+        self._refresh_machine_tree()
+        self.content_stack.setCurrentWidget(self.drive_report)
+        self.thumbnail_view.hide()
+        self.this_pc_view.setMaximumHeight(16777215)
+        self.this_pc_view.setCurrentItem(self.this_pc_item)
+        self.view_mode_widget.setEnabled(False)
+        self.address_bar.setText(self._computer_name)
+        if record_history:
+            self.navigation_history.record(self._THIS_PC_HISTORY_ENTRY)
+        self._ensure_list_width()
+        self._update_nav_actions()
+        self._update_status()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         for share in list(self._ftp_shares.values()):
@@ -590,13 +756,13 @@ class ExplorerWindow(QMainWindow):
                 if self.favorites_view.count() > 0 and self.favorites_view.currentRow() == self.favorites_view.count() - 1:
                     return self._focus_first_file_system_item()
 
-            if watched is self.tree_view:
-                current_index = self.tree_view.currentIndex()
-                if current_index.isValid() and key == Qt.Key_Down:
-                    if not self.tree_view.indexBelow(current_index).isValid():
+            if watched is self.this_pc_view:
+                current_item = self.this_pc_view.currentItem()
+                if current_item is not None and key == Qt.Key_Down:
+                    if self.this_pc_view.itemBelow(current_item) is None:
                         return self._focus_first_network_item()
-                if current_index.isValid() and key == Qt.Key_Up:
-                    if not self.tree_view.indexAbove(current_index).isValid():
+                if current_item is not None and key == Qt.Key_Up:
+                    if self.this_pc_view.itemAbove(current_item) is None:
                         return self._focus_last_favorite_item()
 
             if watched is self.network_panel:
@@ -608,31 +774,25 @@ class ExplorerWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _focus_first_file_system_item(self) -> bool:
-        root_index = self.tree_view.rootIndex()
-        first_index = self.dir_model.index(0, 0, root_index)
-        if not first_index.isValid():
+        first_item = self.this_pc_item.child(0) or self.this_pc_item
+        if first_item is None:
             return True
-        self.tree_view.setFocus()
-        self.tree_view.setCurrentIndex(first_index)
-        self.tree_view.scrollTo(first_index)
+        self.this_pc_view.setFocus()
+        self.this_pc_view.setCurrentItem(first_item)
+        self.this_pc_view.scrollToItem(first_item)
         return True
 
     def _focus_last_file_system_item(self) -> bool:
-        root_index = self.tree_view.rootIndex()
-        first_index = self.dir_model.index(0, 0, root_index)
-        if not first_index.isValid():
-            return True
-
-        last_index = first_index
+        last_item = self.this_pc_item
         while True:
-            next_index = self.tree_view.indexBelow(last_index)
-            if not next_index.isValid():
+            next_item = self.this_pc_view.itemBelow(last_item)
+            if next_item is None:
                 break
-            last_index = next_index
+            last_item = next_item
 
-        self.tree_view.setFocus()
-        self.tree_view.setCurrentIndex(last_index)
-        self.tree_view.scrollTo(last_index)
+        self.this_pc_view.setFocus()
+        self.this_pc_view.setCurrentItem(last_item)
+        self.this_pc_view.scrollToItem(last_item)
         return True
 
     def _focus_last_favorite_item(self) -> bool:
@@ -764,6 +924,8 @@ class ExplorerWindow(QMainWindow):
         menu.addAction("New Folder", self.new_folder)
         menu.addAction("Open Terminal", self.open_terminal)
         menu.addAction("Refresh", self.refresh)
+        menu.addSeparator()
+        self._add_show_hidden_action(menu)
         source = self.sender()
         if isinstance(source, (QTreeView, QListWidget)):
             global_pos = source.viewport().mapToGlobal(pos)
@@ -839,18 +1001,57 @@ class ExplorerWindow(QMainWindow):
         self.status.showMessage(f"Stopped FTP share '{share.share_name}'", 3000)
 
     def _show_file_system_context_menu(self, pos: QPoint) -> None:
-        index = self.tree_view.indexAt(pos)
-        if not index.isValid():
+        item = self.this_pc_view.itemAt(pos)
+        if item is None:
             return
 
-        path = self.dir_model.filePath(index)
-        if not path:
-            return
-
+        path = item.data(0, Qt.ItemDataRole.UserRole)
         menu = QMenu(self)
-        menu.addAction("Browse", lambda target_path=path: self.navigate_to(target_path, record_history=True))
-        menu.addAction("Add to Favorites", lambda target_path=path: self._add_favorite_with_feedback(target_path))
-        menu.exec(self.tree_view.viewport().mapToGlobal(pos))
+        if isinstance(path, str) and path:
+            menu.addAction("Browse", lambda target_path=path: self.navigate_to(target_path, record_history=True))
+            menu.addAction("Add to Favorites", lambda target_path=path: self._add_favorite_with_feedback(target_path))
+            menu.addSeparator()
+        self._add_show_hidden_action(menu)
+        menu.exec(self.this_pc_view.viewport().mapToGlobal(pos))
+
+    def _add_show_hidden_action(self, menu: QMenu) -> None:
+        action = menu.addAction("Show Hidden")
+        action.setCheckable(True)
+        action.setChecked(self._show_hidden)
+        action.toggled.connect(self._set_show_hidden)
+
+    def _set_show_hidden(self, show_hidden: bool) -> None:
+        if self._show_hidden == show_hidden:
+            return
+
+        expanded_paths: list[str] = []
+
+        def collect_expanded_paths(item: QTreeWidgetItem) -> None:
+            for child_index in range(item.childCount()):
+                child = item.child(child_index)
+                path = child.data(0, Qt.ItemDataRole.UserRole)
+                if child.isExpanded() and isinstance(path, str) and path:
+                    expanded_paths.append(path)
+                collect_expanded_paths(child)
+
+        collect_expanded_paths(self.this_pc_item)
+        current_path = None if self._showing_this_pc else self.current_path()
+        self._show_hidden = show_hidden
+        self._refresh_machine_tree()
+        for path in sorted(expanded_paths, key=lambda value: value.count(os.sep)):
+            self._select_machine_path(path)
+
+        if current_path is None:
+            self.this_pc_view.setCurrentItem(self.this_pc_item)
+        else:
+            self._select_machine_path(current_path)
+            self._apply_file_visibility(current_path)
+            if self._view_mode == "thumbnail":
+                self._populate_thumbnail_view(current_path)
+
+        self.list_view.clearSelection()
+        self.thumbnail_view.clearSelection()
+        self._update_status()
 
     def _on_favorite_activated(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.UserRole)
@@ -1045,6 +1246,10 @@ class ExplorerWindow(QMainWindow):
         self.navigate_to(path, record_history=record_history)
 
     def navigate_to(self, path: str, record_history: bool = False) -> None:
+        if path == self._THIS_PC_HISTORY_ENTRY:
+            self.show_this_pc(record_history=record_history)
+            return
+
         normalized = os.path.abspath(os.path.expanduser(path))
         if self._is_app_bundle(normalized):
             QDesktopServices.openUrl(QUrl.fromLocalFile(normalized))
@@ -1056,18 +1261,22 @@ class ExplorerWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid path", f"Folder not found:\n{normalized}")
             return
 
-        if not self._is_windows_unc_path(normalized):
-            self.dir_model.setRootPath(normalized)
-            tree_index = self.dir_model.index(normalized)
-            if tree_index.isValid():
-                self.tree_view.setCurrentIndex(tree_index)
-                self.tree_view.scrollTo(tree_index)
+        self._showing_this_pc = False
+        self.content_stack.setCurrentWidget(self.list_view)
+        self.view_mode_widget.setEnabled(True)
+        self._select_machine_path(normalized)
         self.list_view.setRootIndex(root_index)
+        self._apply_file_visibility(normalized)
         self._auto_resize_name_column()
         self.address_bar.setText(normalized)
 
         if self._view_mode == "thumbnail":
             self._populate_thumbnail_view(normalized)
+            self.thumbnail_view.show()
+            self._ensure_thumbnail_width()
+        else:
+            self.thumbnail_view.hide()
+            self._ensure_list_width()
 
         if record_history:
             self.navigation_history.record(normalized)
@@ -1085,9 +1294,30 @@ class ExplorerWindow(QMainWindow):
         """
         current = self.current_path()
         if os.path.normpath(path) == os.path.normpath(current):
-            self.list_view.setRootIndex(self.fs_model.index(current))
+            root_index = self.fs_model.index(current)
+            self.list_view.setRootIndex(root_index)
+            self._apply_file_visibility(current)
             self._auto_resize_name_column()
             self._update_status()
+
+    def _apply_file_visibility(self, path: str) -> None:
+        root_index = self.list_view.rootIndex()
+        if not root_index.isValid():
+            return
+
+        for row in range(self.fs_model.rowCount(root_index)):
+            index = self.fs_model.index(row, 0, root_index)
+            name = self.fs_model.fileName(index)
+            is_hidden = self._is_hidden_path(self.fs_model.filePath(index), name)
+            self.list_view.setRowHidden(row, root_index, is_hidden)
+
+    def _is_hidden_path(self, path: str, name: str | None = None) -> bool:
+        if self._show_hidden:
+            return False
+        entry_name = name if name is not None else os.path.basename(path)
+        if sys.platform == "darwin" and os.path.normpath(os.path.dirname(path)) == "/":
+            return entry_name.startswith(".")
+        return QFileInfo(path).isHidden()
 
     def _on_address_enter(self) -> None:
         entered = self.address_bar.text().strip()
@@ -1614,6 +1844,8 @@ class ExplorerWindow(QMainWindow):
         self.navigate_to(target, record_history=False)
 
     def go_up(self) -> None:
+        if self._showing_this_pc:
+            return
         current = Path(self.current_path())
         parent = current.parent
         if parent == current:
@@ -1631,6 +1863,8 @@ class ExplorerWindow(QMainWindow):
         return [index for index in selection if index.isValid()]
 
     def selected_paths(self) -> list[str]:
+        if self._showing_this_pc:
+            return []
         if self._view_mode == "thumbnail":
             selected_items = self.thumbnail_view.selectedItems()
             return [item.data(Qt.UserRole) for item in selected_items if item.data(Qt.UserRole)]
@@ -1703,6 +1937,8 @@ class ExplorerWindow(QMainWindow):
         self.status.showMessage(f"Cut {len(paths)} item(s)", 2500)
 
     def paste_into_current(self) -> None:
+        if self._showing_this_pc:
+            return
         if not self._clipboard_paths or self._clipboard_mode is None:
             return
 
@@ -1761,6 +1997,8 @@ class ExplorerWindow(QMainWindow):
             QMessageBox.warning(self, "Delete", "Some items could not be deleted:\n" + "\n".join(failures))
 
     def new_folder(self) -> None:
+        if self._showing_this_pc:
+            return
         parent = Path(self.current_path())
         name, ok = QInputDialog.getText(self, "New Folder", "Folder name:", text="New Folder")
         if not ok or not name.strip():
@@ -1772,6 +2010,8 @@ class ExplorerWindow(QMainWindow):
             QMessageBox.critical(self, "New Folder failed", str(error))
 
     def open_terminal(self) -> None:
+        if self._showing_this_pc:
+            return
         current_path = self.current_path()
         try:
             if sys.platform == "darwin":
@@ -1809,19 +2049,29 @@ class ExplorerWindow(QMainWindow):
             QMessageBox.critical(self, "Open Terminal failed", str(error))
 
     def refresh(self) -> None:
+        if self._showing_this_pc:
+            self.drive_report.refresh_drives()
+            self._refresh_machine_tree()
+            self._update_status()
+            return
+
         current = self.current_path()
         index = self.fs_model.index(current)
         self.list_view.setRootIndex(index)
+        self._apply_file_visibility(current)
         self._auto_resize_name_column()
-        if not self._is_windows_unc_path(current):
-            tree_index = self.dir_model.index(current)
-            self.tree_view.setCurrentIndex(tree_index)
-            self.tree_view.scrollTo(tree_index)
+        self._select_machine_path(current)
         if self._view_mode == "thumbnail":
             self._populate_thumbnail_view(current)
         self._update_status()
 
     def _update_status(self) -> None:
+        if self._showing_this_pc:
+            self.status.showMessage(
+                f"Drives: {self.drive_report.drive_count} | Double-click a drive to open it"
+            )
+            return
+
         if self._view_mode == "thumbnail":
             item_count = self.thumbnail_view.count()
         else:
@@ -1829,7 +2079,10 @@ class ExplorerWindow(QMainWindow):
             if not root_index.isValid():
                 self.status.showMessage("Ready")
                 return
-            item_count = self.fs_model.rowCount(root_index)
+            item_count = sum(
+                not self.list_view.isRowHidden(row, root_index)
+                for row in range(self.fs_model.rowCount(root_index))
+            )
 
         selected_paths = self.selected_paths()
 
@@ -1879,7 +2132,11 @@ class ExplorerWindow(QMainWindow):
             icon_provider = self.fs_model.iconProvider()
             ghost_icon = self._build_ghost_thumbnail_icon(self.thumbnail_view.iconSize())
 
-            entries = [entry for entry in os.scandir(path) if not entry.name.startswith('.')]
+            entries = [
+                entry
+                for entry in os.scandir(path)
+                if not self._is_hidden_path(entry.path, entry.name)
+            ]
             self._thumbnail_fast_mode = len(entries) > 120
             preview_paths: list[str] = []
 
@@ -2446,6 +2703,12 @@ class ExplorerWindow(QMainWindow):
         if mode not in {"list", "thumbnail"}:
             return
 
+        if self._showing_this_pc:
+            self._view_mode = mode
+            self._update_view_mode_buttons()
+            self._update_status()
+            return
+
         if mode == self._view_mode:
             self._update_view_mode_buttons()
             return
@@ -2453,13 +2716,13 @@ class ExplorerWindow(QMainWindow):
         if mode == "thumbnail":
             self._view_mode = "thumbnail"
             self._populate_thumbnail_view(self.current_path())
-            self.list_view.hide()
+            self.content_stack.setCurrentWidget(self.list_view)
             self.thumbnail_view.show()
             self._ensure_thumbnail_width()
         else:
             self._view_mode = "list"
             self.thumbnail_view.hide()
-            self.list_view.show()
+            self.content_stack.setCurrentWidget(self.list_view)
             self._ensure_list_width()
 
         self._update_view_mode_buttons()

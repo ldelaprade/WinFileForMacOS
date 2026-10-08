@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QMimeData, Qt, QUrl
 from PySide6.QtGui import QDrag, QDropEvent
-from PySide6.QtWidgets import QFileSystemModel, QListWidget, QTreeView
+from PySide6.QtWidgets import QFileSystemModel, QListWidget, QTreeView, QTreeWidget
 
 
 class ConfirmingDropTreeView(QTreeView):
@@ -84,6 +84,74 @@ class ConfirmingDropTreeView(QTreeView):
             return []
         selected_rows = selection_model.selectedRows()
         return [model.filePath(index) for index in selected_rows if index.isValid()]
+
+
+class MachineTreeWidget(QTreeWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._drop_target_path_callback: Callable[[], str] | None = None
+        self._file_drop_callback: Callable[[str, list[str], bool], bool] | None = None
+
+    def set_drop_target_path_callback(self, callback: Callable[[], str]) -> None:
+        self._drop_target_path_callback = callback
+
+    def set_file_drop_callback(self, callback: Callable[[str, list[str], bool], bool]) -> None:
+        self._file_drop_callback = callback
+
+    def startDrag(self, supported_actions: Qt.DropAction) -> None:
+        paths = [
+            item.data(0, Qt.ItemDataRole.UserRole)
+            for item in self.selectedItems()
+            if item.data(0, Qt.ItemDataRole.UserRole)
+        ]
+        if not paths:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(_build_file_drag_mime_data(paths))
+        drag.exec(supported_actions, Qt.DropAction.CopyAction)
+
+    def dragEnterEvent(self, event) -> None:
+        if self._extract_local_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if self._extract_local_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        source_paths = self._extract_local_paths_from_mime(event.mimeData())
+        if not source_paths or self._file_drop_callback is None:
+            event.ignore()
+            return
+
+        target_item = self.itemAt(event.position().toPoint())
+        destination_path = ""
+        if target_item is not None:
+            value = target_item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(value, str):
+                destination_path = value
+        elif self._drop_target_path_callback is not None:
+            destination_path = self._drop_target_path_callback()
+
+        if destination_path and (os.path.isfile(destination_path) or os.path.islink(destination_path)):
+            destination_path = os.path.dirname(destination_path)
+
+        is_move_drop = (
+            event.proposedAction() == Qt.DropAction.MoveAction
+            or event.dropAction() == Qt.DropAction.MoveAction
+        )
+        if self._file_drop_callback(destination_path, source_paths, is_move_drop):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    @staticmethod
+    def _extract_local_paths_from_mime(mime_data: QMimeData) -> list[str]:
+        return [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
 
 
 class FileDragListWidget(QListWidget):
