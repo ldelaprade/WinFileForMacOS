@@ -154,7 +154,9 @@ class DriveReportWidget(QWidget):
 
         if normalized in disk_image_mounts:
             return False
-        if device.startswith(("//", "\\\\")):
+        if device.startswith(("//", "\\\\")) and not (
+            sys.platform == "win32" and device.startswith("\\\\?\\volume{")
+        ):
             return False
         if any(token in filesystem for token in ("smb", "nfs", "cifs", "afp", "webdav", "sshfs")):
             return False
