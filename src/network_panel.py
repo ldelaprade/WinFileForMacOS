@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Callable
 from urllib.parse import unquote, urlparse
 
-from PySide6.QtCore import QMimeData, QSettings, Qt, QUrl, Signal
+from PySide6.QtCore import QMimeData, QSettings, QStorageInfo, Qt, QUrl, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWidgetItem, QWidget, QFileIconProvider
 
@@ -88,8 +88,7 @@ def normalize_network_share_input(raw_input: str) -> str:
 
 
 def _get_windows_network_shares() -> list[tuple[str, str, str]]:
-    """Return active Windows network shares from `net use` output, plus any
-    FTP locations mounted via rclone (which `net use` doesn't know about)."""
+    """Return Windows mapped volumes, additional `net use` shares, and rclone FTP mounts."""
     shares: list[tuple[str, str, str]] = []
     seen_paths: set[str] = set()
 
@@ -97,6 +96,18 @@ def _get_windows_network_shares() -> list[tuple[str, str, str]]:
         display = _network_share_display_name(mount_path, source_url)
         shares.append((display, mount_path, source_url))
         seen_paths.add(mount_path.lower())
+
+    for volume in QStorageInfo.mountedVolumes():
+        remote_path = bytes(volume.device()).decode("utf-8", errors="replace").rstrip("\\")
+        if not remote_path.startswith("\\\\") or remote_path.startswith("\\\\?\\"):
+            continue
+        normalized = remote_path.lower()
+        if normalized in seen_paths:
+            continue
+        seen_paths.add(normalized)
+        parts = [segment for segment in remote_path.split("\\") if segment]
+        display = parts[1] if len(parts) >= 2 else remote_path
+        shares.append((display, volume.rootPath(), remote_path))
 
     try:
         result = subprocess.run(
@@ -138,7 +149,9 @@ def _get_windows_network_shares() -> list[tuple[str, str, str]]:
 
         parts = [segment for segment in remote_path.split("\\") if segment]
         display = parts[1] if len(parts) >= 2 else remote_path
-        shares.append((display, remote_path, remote_path))
+        local_match = re.search(r"\b[A-Za-z]:\s*$", line[:match.start()])
+        mount_path = local_match.group(0).strip() + "/" if local_match else remote_path
+        shares.append((display, mount_path, remote_path))
 
     return shares
 
@@ -344,7 +357,11 @@ class NetworkPanel(QTreeWidget):
 
         seen_paths: set[str] = set()
         for display_name, mount_path, source_url in shares:
-            normalized = mount_path.lower()
+            normalized = (
+                source_url.rstrip("\\/").lower()
+                if os.name == "nt" and source_url.startswith("\\\\")
+                else mount_path.lower()
+            )
             if normalized in seen_paths:
                 continue
             seen_paths.add(normalized)
@@ -413,7 +430,8 @@ class NetworkPanel(QTreeWidget):
     def _on_disconnect(self, item: QTreeWidgetItem) -> None:
         path = item.data(0, self._PATH_ROLE)
         if path:
-            self.unregister_known_windows_share(path)
+            source_url = item.data(0, self._SOURCE_URL_ROLE) or path
+            self.unregister_known_windows_share(source_url)
             unmount_share(path)
         self.refresh_shares()
 
