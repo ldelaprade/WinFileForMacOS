@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import plistlib
+import json
+import os
+import stat
 import subprocess
 import sys
 
@@ -72,11 +75,14 @@ class DriveReportWidget(QWidget):
             and volume.bytesTotal() > 0
             and self._is_user_visible_volume(volume, disk_image_mounts)
         ]
+        if sys.platform.startswith("linux"):
+            volumes = self._unique_linux_volumes(volumes)
         volumes.sort(key=lambda volume: volume.rootPath().casefold())
+        device_labels = self._linux_device_labels() if sys.platform.startswith("linux") else {}
 
         self._paths = [volume.rootPath() for volume in volumes]
         self._drive_entries = [
-            (self._volume_label(volume), volume.rootPath()) for volume in volumes
+            (self._volume_label(volume, device_labels), volume.rootPath()) for volume in volumes
         ]
         for row in range(self.table.rowCount()):
             for column in range(self.table.columnCount()):
@@ -92,7 +98,7 @@ class DriveReportWidget(QWidget):
 
         for row, volume in enumerate(volumes):
             root_path = volume.rootPath()
-            drive_name = volume.displayName().strip() or root_path
+            drive_name = self._volume_label(volume, device_labels)
             name_label = QLabel(f"<b>{drive_name}</b><br><span style='color:#666'>{root_path}</span>")
             name_label.setContentsMargins(8, 4, 4, 4)
             name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -164,14 +170,58 @@ class DriveReportWidget(QWidget):
         if sys.platform == "darwin":
             return normalized == "/" or normalized.startswith("/Volumes/")
         if sys.platform.startswith("linux"):
-            hidden_roots = ("/dev", "/proc", "/run", "/sys")
-            if device.startswith("/dev/loop") or filesystem == "squashfs":
+            if device.startswith(("/dev/loop", "/dev/ram", "/dev/zram")) or filesystem == "squashfs":
                 return False
-            return not any(
-                normalized == root or normalized.startswith(root + "/")
-                for root in hidden_roots
-            )
+            device_path = bytes(volume.device()).decode("utf-8", errors="replace")
+            try:
+                return stat.S_ISBLK(os.stat(device_path).st_mode)
+            except OSError:
+                return False
         return True
+
+    @staticmethod
+    def _unique_linux_volumes(volumes: list[QStorageInfo]) -> list[QStorageInfo]:
+        devices: set[str] = set()
+        unique_volumes: list[QStorageInfo] = []
+        for volume in sorted(volumes, key=lambda volume: volume.rootPath() != "/"):
+            device = os.path.realpath(bytes(volume.device()).decode("utf-8", errors="replace"))
+            if device not in devices:
+                devices.add(device)
+                unique_volumes.append(volume)
+        return unique_volumes
+
+    @staticmethod
+    def _linux_device_labels() -> dict[str, str]:
+        try:
+            result = subprocess.run(
+                ["lsblk", "--json", "--paths", "--output", "NAME,TYPE,VENDOR,MODEL"],
+                capture_output=True,
+                check=True,
+                timeout=5,
+            )
+            devices = json.loads(result.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return {}
+
+        labels: dict[str, str] = {}
+
+        def collect(device: dict, parent_label: str = "") -> None:
+            model = (device.get("model") or "").strip()
+            vendor = (device.get("vendor") or "").strip()
+            label = parent_label
+            if model:
+                label = f"{vendor} {model}" if vendor and vendor != "ATA" else model
+            name = device.get("name") or ""
+            if name and label:
+                labels[os.path.realpath(name)] = (
+                    label if device.get("type") == "disk" else f"{label} ({os.path.basename(name)})"
+                )
+            for child in device.get("children", []):
+                collect(child, label)
+
+        for device in devices.get("blockdevices", []):
+            collect(device)
+        return labels
 
     @staticmethod
     def _disk_image_mounts() -> set[str]:
@@ -196,12 +246,13 @@ class DriveReportWidget(QWidget):
         }
 
     @staticmethod
-    def _volume_label(volume: QStorageInfo) -> str:
+    def _volume_label(volume: QStorageInfo, device_labels: dict[str, str] | None = None) -> str:
         root_path = volume.rootPath()
         if sys.platform == "win32":
             return root_path.rstrip("\\/") or root_path
         if sys.platform.startswith("linux"):
-            return root_path
+            device = os.path.realpath(bytes(volume.device()).decode("utf-8", errors="replace"))
+            return (device_labels or {}).get(device) or volume.displayName().strip() or root_path
         return volume.displayName().strip() or root_path
 
     @staticmethod
