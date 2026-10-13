@@ -7,6 +7,10 @@
 ### On Windows
 ![Windows](windows.png)
 
+
+### On Linux
+![Linux](linux.png)
+
 # WinFile XP (Starter)
 
 A minimal Windows XP-style file explorer starter for macOS using Python and PySide6.
