@@ -1,5 +1,11 @@
 # WinFileForMacOS
-## Windows Style Alternative For MacOS Finder
+## Windows Style Alternative For MacOS Finder (but with Windows and Linux versions as well)
+
+### On MacOS
+![MacOS](macOS.png)
+
+### On Windows
+![Windows](windows.png)
 
 # WinFile XP (Starter)
 
