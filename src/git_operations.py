@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,35 +53,35 @@ class GitOperations:
                     if action in {"staging", "unstaging"}:
                         return self._changes(repository)
                     if action == "status":
-                        return repository.git.status(untracked_files="all", kill_after_timeout=30)
+                        return repository.git.status(untracked_files="all", **self._timeout_options(30))
                     if action in {"push", "pull"}:
                         command = repository.git.push if action == "push" else repository.git.pull
                         options = ["--verbose"] if action == "push" else ["--ff-only"]
                         _, stdout, stderr = command(
-                            *options, with_extended_output=True, kill_after_timeout=120
+                            *options, with_extended_output=True, **self._timeout_options(120)
                         )
                         return "\n".join(part for part in (stdout, stderr) if part) or f"Git {action} completed."
                     if action == "diff":
                         return repository.git.diff(
-                            "--cached", "--no-ext-diff", "--no-textconv", kill_after_timeout=30
+                            "--cached", "--no-ext-diff", "--no-textconv", **self._timeout_options(30)
                         ) or "No staged changes."
                     if action in {"stage", "unstage"}:
                         if not selected:
                             raise GitOperationError("Select files or folders first.")
                         if action == "stage":
-                            repository.git.add("--all", "--", *selected, kill_after_timeout=30)
+                            repository.git.add("--all", "--", *selected, **self._timeout_options(30))
                         elif repository.head.is_valid():
-                            repository.git.reset("HEAD", "--", *selected, kill_after_timeout=30)
+                            repository.git.reset("HEAD", "--", *selected, **self._timeout_options(30))
                         else:
                             repository.git.rm(
                                 "--cached", "-r", "--force", "--ignore-unmatch",
-                                "--", *selected, kill_after_timeout=30,
+                                "--", *selected, **self._timeout_options(30),
                             )
                         return f"{'Staged' if action == 'stage' else 'Unstaged'} {len(selected)} selected item(s)."
                     if action == "commit":
                         if not message.strip():
                             raise GitOperationError("A commit message is required.")
-                        return repository.git.commit("-m", message.strip(), kill_after_timeout=30)
+                        return repository.git.commit("-m", message.strip(), **self._timeout_options(30))
                     raise GitOperationError(f"Unsupported Git action: {action}")
         except (InvalidGitRepositoryError, NoSuchPathError) as error:
             raise GitOperationError("This folder is not inside a Git repository.") from error
@@ -90,9 +91,13 @@ class GitOperations:
             raise GitOperationError(str(error)) from error
 
     @staticmethod
+    def _timeout_options(seconds: int) -> dict[str, int]:
+        return {} if sys.platform == "win32" else {"kill_after_timeout": seconds}
+
+    @staticmethod
     def _changes(repository: Repo) -> GitChanges:
         records = iter(repository.git.status(
-            "--porcelain=v1", "-z", untracked_files="all", kill_after_timeout=30
+            "--porcelain=v1", "-z", untracked_files="all", **GitOperations._timeout_options(30)
         ).split("\0"))
         modified: list[GitChange] = []
         untracked: list[GitChange] = []

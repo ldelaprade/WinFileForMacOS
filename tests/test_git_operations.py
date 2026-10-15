@@ -34,6 +34,15 @@ class GitOperationsTests(unittest.TestCase):
         nested.mkdir()
         self.assertIn("No commits yet", GitOperations(str(nested)).run("status"))
 
+    def test_timeout_options_are_platform_aware(self):
+        for platform in ("win32", "darwin", "linux"):
+            for seconds in (30, 120):
+                with self.subTest(platform=platform, seconds=seconds), patch(
+                    "src.git_operations.sys.platform", platform
+                ):
+                    expected = {} if platform == "win32" else {"kill_after_timeout": seconds}
+                    self.assertEqual(self.operations._timeout_options(seconds), expected)
+
     def test_changes_separate_modified_untracked_and_staged_repository_wide(self):
         modified = self.write_file("modified.txt")
         deleted = self.write_file("deleted.txt")
