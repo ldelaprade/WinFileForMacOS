@@ -29,12 +29,14 @@ A minimal Windows XP-style file explorer starter for macOS using Python and PySi
 - Right pane supports multi-selection for bulk move/delete
 - Favorites are persisted across launches (bookmarks are restored on startup)
 - Favorites can be re-ordered by drag-and-drop
-- Git context menu: repository status, stage/unstage selected items, staged diffs, commits, and repository initialization
+- Git context menu: repository cloning and status, stage/unstage selected items, staged diffs, commits, and repository initialization
+- SVN context menu: working-copy status, diffs, add selected items, commit selected items, and update
 
 ## Requirements
 
 - Python 3.10+
 - Git installed and available on `PATH` for Git operations (also required for packaged applications)
+- Subversion's `svn` command installed and available on `PATH` for SVN operations (also required for packaged applications)
 
 ## Run
 
@@ -60,8 +62,14 @@ python -m src.main
 
 ## Git Integration
 
-Right-click in the file pane and open **Git**. Repository actions use the repository
-containing the current folder, including when browsing a subfolder. **Staging...**
+Right-click in the file pane and open **Git**. **Clone Repository...** accepts an
+HTTPS, SSH, `git://`, or local repository URL and checks it out into a chosen
+parent folder. The destination name is suggested from the URL and can be edited;
+the destination must be new or empty. Use a configured Git credential helper or
+SSH agent for private repositories; terminal prompts are disabled.
+
+Other repository actions use the repository containing the current folder,
+including when browsing a subfolder. **Staging...**
 and **Unstaging...** are available without selecting files in the explorer.
 **Staging...** lists repository-wide **Modified Files** and **Untracked Files** in
 separate sections: check files and click **Stage**. **Unstaging...** lists staged
@@ -84,8 +92,35 @@ commit identity are reported in a dialog. Configure identity with `git config
 --global user.name "Your Name"` and `git config --global user.email "you@example.com"`.
 
 This initial increment uses GitPython and standard Git, without hosting-service
-APIs. Status overlays, branch management, clone, and standalone fetch are not yet
+APIs. Status overlays, branch management, and standalone fetch are not yet
 implemented. No discard, hard-reset, or force-push actions are exposed.
+
+## SVN Integration
+
+Browse an existing SVN working copy, right-click in the file pane, and open
+**SVN**. **Working Copy Status** and **Update** operate on the current folder
+and its descendants. The status dialog also offers **Update** and **Close**.
+**Diff** shows local changes for the selected items, or the current folder if
+nothing is selected.
+
+Select files or folders in the explorer before using **Add Selected** or
+**Commit Selected**. Add schedules unversioned items for the next commit; Commit
+asks for a message and sends the selected changes directly to the SVN server.
+Selecting a folder includes its descendants. Unselected files are not committed
+unless they are inside a selected folder. SVN has no Git-style staging or Push.
+
+Commands run in a background worker with a 120-second timeout per command and
+use existing SVN configuration and cached credentials. If cached authentication
+fails, the app prompts for a username and masked password, then retries once.
+Credentials supplied in the prompt are not saved to the SVN authentication
+cache. The SVN client receives the password as a command-line argument for that
+retry, so use this only on a trusted machine. Failures and Update conflict
+reports are displayed in a dialog; conflicts must be resolved outside this app.
+**Checkout...** opens a dialog for an SVN URL and local parent folder. The local
+checkout folder name is suggested from the URL and can be changed. The checkout
+destination must be new or empty; after checkout, the app opens the working copy.
+Authentication uses the SVN prompt described above. Revert and conflict
+resolution are not included in this initial integration.
 
 ## Build
 

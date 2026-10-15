@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import SplitResult, unquote, urlsplit
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent
@@ -9,7 +10,9 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -17,6 +20,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QSpinBox,
+    QPushButton,
     QVBoxLayout,
 )
 
@@ -78,6 +82,149 @@ class GitStagingDialog(QDialog):
 
     def _update_action_button(self) -> None:
         self.action_button.setEnabled(bool(self.selected_paths()))
+
+
+class SvnCheckoutDialog(QDialog):
+    def __init__(
+        self,
+        parent_directory: str,
+        parent: QMainWindow | None = None,
+        supported_schemes: set[str] | None = None,
+        action_label: str = "Checkout",
+        dialog_title: str = "Checkout SVN Working Copy",
+        url_placeholder: str = "https://svn.example.com/repository/project",
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(dialog_title)
+        self.supported_schemes = supported_schemes or {"file", "http", "https", "svn", "svn+ssh"}
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.url_edit = QLineEdit(self)
+        self.url_edit.setPlaceholderText(url_placeholder)
+        form.addRow("Repository URL:", self.url_edit)
+
+        self.parent_directory_edit = QLineEdit(parent_directory, self)
+        browse_button = QPushButton("Browse...", self)
+        browse_button.clicked.connect(self._browse_parent_directory)
+        parent_row = QHBoxLayout()
+        parent_row.addWidget(self.parent_directory_edit)
+        parent_row.addWidget(browse_button)
+        form.addRow("Local parent folder:", parent_row)
+
+        self.folder_name_edit = QLineEdit(self)
+        self.folder_name_edit.setPlaceholderText("Folder name from repository URL")
+        form.addRow("Checkout folder:", self.folder_name_edit)
+        layout.addLayout(form)
+
+        self.checkout_button = QPushButton(action_label, self)
+        self.cancel_button = QPushButton("Cancel", self)
+        self.checkout_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.checkout_button)
+        layout.addLayout(buttons)
+
+        self._folder_name_edited = False
+        self.url_edit.textChanged.connect(self._suggest_folder_name)
+        self.url_edit.textChanged.connect(self._update_checkout_button)
+        self.folder_name_edit.textEdited.connect(self._mark_folder_name_edited)
+        self.parent_directory_edit.textChanged.connect(self._update_checkout_button)
+        self.folder_name_edit.textChanged.connect(self._update_checkout_button)
+        self._update_checkout_button()
+
+    def values(self) -> tuple[str, str]:
+        destination = Path(self.parent_directory_edit.text().strip()).expanduser() / self.folder_name_edit.text().strip()
+        return self.url_edit.text().strip(), str(destination.absolute())
+
+    def _browse_parent_directory(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Local Parent Folder", self.parent_directory_edit.text()
+        )
+        if directory:
+            self.parent_directory_edit.setText(directory)
+
+    def _suggest_folder_name(self, url: str) -> None:
+        if self._folder_name_edited:
+            return
+        try:
+            path_parts = urlsplit(url.strip()).path.rstrip("/").split("/")
+            folder_name = unquote(path_parts[-1]) if path_parts and path_parts[-1] else ""
+        except ValueError:
+            folder_name = ""
+        self.folder_name_edit.setText(folder_name)
+
+    def _mark_folder_name_edited(self) -> None:
+        self._folder_name_edited = True
+
+    def _update_checkout_button(self) -> None:
+        url = self.url_edit.text().strip()
+        try:
+            parsed_url = urlsplit(url)
+        except ValueError:
+            self.checkout_button.setEnabled(False)
+            return
+        parent_directory = Path(self.parent_directory_edit.text().strip()).expanduser()
+        folder_name = self.folder_name_edit.text().strip()
+        valid_url = self._is_valid_repository_url(url, parsed_url)
+        valid_folder = bool(folder_name) and folder_name not in {".", ".."} and not any(
+            separator in folder_name for separator in ("/", "\\")
+        )
+        destination = parent_directory / folder_name
+        safe_destination = not destination.exists() or (
+            destination.is_dir() and not any(destination.iterdir())
+        )
+        self.checkout_button.setEnabled(
+            valid_url and valid_folder and parent_directory.is_dir() and safe_destination
+        )
+
+    def _is_valid_repository_url(self, url: str, parsed_url: SplitResult) -> bool:
+        return parsed_url.scheme in self.supported_schemes and bool(
+            parsed_url.path.strip("/")
+        ) and parsed_url.username is None and parsed_url.password is None
+
+
+class GitCloneDialog(SvnCheckoutDialog):
+    def __init__(self, parent_directory: str, parent: QMainWindow | None = None) -> None:
+        super().__init__(
+            parent_directory,
+            parent,
+            supported_schemes={"file", "http", "https", "ssh", "git"},
+            action_label="Clone",
+            dialog_title="Clone Git Repository",
+            url_placeholder="https://github.com/owner/repository.git",
+        )
+        self.url_edit.textChanged.disconnect(self._suggest_folder_name)
+        self.url_edit.textChanged.connect(self._suggest_git_folder_name)
+
+    def _is_valid_repository_url(self, url: str, parsed_url: SplitResult) -> bool:
+        if parsed_url.scheme in self.supported_schemes:
+            return bool(parsed_url.path.strip("/")) and parsed_url.username is None and parsed_url.password is None
+        if parsed_url.scheme:
+            return False
+        if ":" in url:
+            host, path = url.split(":", 1)
+            if path and host and "/" not in host and not any(character.isspace() for character in host):
+                return True
+        return bool(url)
+
+    def _suggest_git_folder_name(self, url: str) -> None:
+        if self._folder_name_edited:
+            return
+        try:
+            parsed_url = urlsplit(url.strip())
+        except ValueError:
+            self.folder_name_edit.clear()
+            return
+        path = parsed_url.path
+        if not path and "@" in url and ":" in url:
+            path = url.rsplit(":", 1)[-1]
+        folder_name = unquote(path.rstrip("/").rsplit("/", 1)[-1]) if path else ""
+        if folder_name.lower().endswith(".git"):
+            folder_name = folder_name[:-4]
+        self.folder_name_edit.setText(folder_name)
 
 
 def selection_preview(paths: list[str], max_items: int = 3) -> str:

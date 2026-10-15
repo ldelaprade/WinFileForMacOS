@@ -34,6 +34,35 @@ class GitOperationsTests(unittest.TestCase):
         nested.mkdir()
         self.assertIn("No commits yet", GitOperations(str(nested)).run("status"))
 
+    def test_clone_local_repository_into_explicit_destination(self):
+        source_file = self.write_file("source file.txt", "clone content\n")
+        self.operations.run("stage", [source_file])
+        self.operations.run("commit", message="Initial clone source")
+        destination = self.root / "local clones" / "sample repository"
+        destination.parent.mkdir()
+
+        output = GitOperations(str(destination.parent)).run(
+            "clone", [str(self.root), str(destination)]
+        )
+
+        self.assertIn(str(destination), output)
+        self.assertEqual((destination / "source file.txt").read_text(), "clone content\n")
+        with Repo(destination) as cloned:
+            self.assertEqual(cloned.head.commit.message.strip(), "Initial clone source")
+
+    def test_clone_rejects_empty_url_password_and_nonempty_destination(self):
+        destination = self.root / "destination"
+        destination.mkdir()
+        (destination / "keep.txt").write_text("keep\n")
+        for url, target in (
+            ("", self.root / "empty-url"),
+            ("https://user:token@example.com/repo.git", self.root / "embedded-password"),
+            (str(self.root), destination),
+        ):
+            with self.subTest(url=url), self.assertRaises(GitOperationError):
+                self.operations.run("clone", [url, str(target)])
+        self.assertEqual((destination / "keep.txt").read_text(), "keep\n")
+
     def test_timeout_options_are_platform_aware(self):
         for platform in ("win32", "darwin", "linux"):
             for seconds in (30, 120):
@@ -225,10 +254,11 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         with patch.object(self.window, "selected_paths", return_value=[]):
             self.window._add_git_menu(menu)
         actions = menu.actions()[0].menu().actions()
-        self.assertTrue(actions[1].isEnabled())
+        self.assertEqual(actions[0].text(), "Clone Repository...")
         self.assertTrue(actions[2].isEnabled())
-        self.assertEqual(actions[1].text(), "Staging...")
-        self.assertEqual(actions[2].text(), "Unstaging...")
+        self.assertTrue(actions[3].isEnabled())
+        self.assertEqual(actions[2].text(), "Staging...")
+        self.assertEqual(actions[3].text(), "Unstaging...")
         self.assertTrue(actions[0].isEnabled())
 
     def test_menu_uses_current_folder_not_selection(self):
@@ -240,11 +270,61 @@ class GitExplorerIntegrationTests(unittest.TestCase):
             self.window, "selected_paths", return_value=paths
         ), patch.object(self.window, "_start_git_operation") as start:
             self.window._add_git_menu(menu)
-            menu.actions()[0].menu().actions()[1].trigger()
+            menu.actions()[0].menu().actions()[2].trigger()
             start.assert_called_once_with("staging", self.temporary.name, [])
             start.reset_mock()
-            menu.actions()[0].menu().actions()[2].trigger()
+            menu.actions()[0].menu().actions()[3].trigger()
             start.assert_called_once_with("unstaging", self.temporary.name, [])
+
+    def test_git_clone_dialog_suggests_folder_from_https_and_ssh_urls(self):
+        from PySide6.QtTest import QTest
+        from src.dialogs import GitCloneDialog
+
+        dialog = GitCloneDialog(self.temporary.name, self.window)
+        self.addCleanup(dialog.close)
+        for url, folder in (
+            ("https://github.com/owner/sample-repository.git", "sample-repository"),
+            ("git@github.com:owner/another-repository.git", "another-repository"),
+        ):
+            with self.subTest(url=url):
+                dialog.url_edit.setText(url)
+                self.assertEqual(dialog.folder_name_edit.text(), folder)
+                self.assertTrue(dialog.checkout_button.isEnabled())
+        dialog.folder_name_edit.selectAll()
+        QTest.keyClicks(dialog.folder_name_edit, "custom-name")
+        dialog.url_edit.setText("https://github.com/owner/changed.git")
+        self.assertEqual(dialog.folder_name_edit.text(), "custom-name")
+
+    def test_clone_menu_starts_dialog_and_background_operation(self):
+        from PySide6.QtWidgets import QDialog, QMenu
+        from src.dialogs import GitCloneDialog
+
+        menu = QMenu(self.window)
+        with patch.object(self.window, "current_path", return_value=self.temporary.name):
+            self.window._add_git_menu(menu)
+        clone_action = menu.actions()[0].menu().actions()[0]
+        destination = str(Path(self.temporary.name) / "repo")
+        with patch.object(GitCloneDialog, "exec", return_value=QDialog.DialogCode.Accepted), patch.object(
+            GitCloneDialog, "values", return_value=("https://example.com/repo.git", destination)
+        ), patch.object(self.window, "_start_git_operation") as start:
+            clone_action.trigger()
+        start.assert_called_once_with(
+            "clone", self.temporary.name, ["https://example.com/repo.git", destination]
+        )
+
+    def test_successful_clone_opens_destination(self):
+        from src.file_explorer import _GitWorker
+
+        destination = str(Path(self.temporary.name) / "cloned-repository")
+        self.window._git_worker = _GitWorker(
+            self.temporary.name, "clone", ["https://example.com/repo.git", destination], ""
+        )
+        with patch.object(self.window, "navigate_to") as navigate, patch.object(
+            self.window, "_show_git_output"
+        ) as output:
+            self.window._git_operation_finished("Clone complete", True)
+        navigate.assert_called_once_with(destination, record_history=True)
+        output.assert_called_once_with("Clone complete")
 
     def test_staging_dialog_separates_sections_and_stages_only_checked_files(self):
         from PySide6.QtCore import Qt

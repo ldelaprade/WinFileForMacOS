@@ -4,6 +4,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from git import GitCommandError, InvalidGitRepositoryError, NoSuchPathError, Repo
 
@@ -34,6 +35,10 @@ class GitOperations:
         self, action: str, paths: list[str] | None = None, message: str = ""
     ) -> str | GitChanges:
         try:
+            if action == "clone":
+                if not paths or len(paths) != 2:
+                    raise GitOperationError("Provide a repository URL and clone destination.")
+                return self.clone(paths[0], paths[1])
             if action == "init":
                 try:
                     with Repo(self.directory, search_parent_directories=True):
@@ -89,6 +94,29 @@ class GitOperations:
             raise GitOperationError(error.stderr.strip() or str(error)) from error
         except OSError as error:
             raise GitOperationError(str(error)) from error
+
+    def clone(self, url: str, destination: str) -> str:
+        url = url.strip()
+        if not url:
+            raise GitOperationError("Enter a Git repository URL or local path.")
+        try:
+            parsed_url = urlsplit(url)
+        except ValueError as error:
+            raise GitOperationError("Enter a valid Git repository URL or local path.") from error
+        if parsed_url.username is not None or parsed_url.password is not None:
+            raise GitOperationError("Do not include credentials in the repository URL.")
+        if parsed_url.scheme and parsed_url.scheme not in {"file", "http", "https", "ssh", "git"}:
+            raise GitOperationError("Enter a Git URL using HTTPS, SSH, git, or a local path.")
+        target = Path(os.path.abspath(os.path.expanduser(destination)))
+        if not target.parent.is_dir():
+            raise GitOperationError("The clone parent folder does not exist.")
+        if target.exists() and (not target.is_dir() or any(target.iterdir())):
+            raise GitOperationError("The clone destination must be a new or empty folder.")
+        with Repo.clone_from(
+            url, str(target), env={"GIT_TERMINAL_PROMPT": "0"},
+            **self._timeout_options(120),
+        ) as repository:
+            return f"Cloned {url} to {repository.working_tree_dir}."
 
     @staticmethod
     def _timeout_options(seconds: int) -> dict[str, int]:

@@ -86,7 +86,9 @@ from .dialogs import (
     SshLocationDialog,
     FtpLocationDialog,
     FtpShareDialog,
+    GitCloneDialog,
     GitStagingDialog,
+    SvnCheckoutDialog,
     WindowsShareDialog,
     build_delete_confirmation_message,
     build_move_confirmation_message,
@@ -160,7 +162,7 @@ class _ThumbnailPreviewWorker(QRunnable):
         self.signals.finished.emit(self.token)
 
 
-class _GitWorkerSignals(QObject):
+class _VersionControlWorkerSignals(QObject):
     completed = Signal(object, bool)
 
 
@@ -171,7 +173,7 @@ class _GitWorker(QRunnable):
         self.action = action
         self.paths = paths
         self.message = message
-        self.signals = _GitWorkerSignals()
+        self.signals = _VersionControlWorkerSignals()
 
     def run(self) -> None:
         try:
@@ -179,6 +181,32 @@ class _GitWorker(QRunnable):
 
             output = GitOperations(self.directory).run(self.action, self.paths, self.message)
         except Exception as error:
+            self.signals.completed.emit(str(error), False)
+        else:
+            self.signals.completed.emit(output, True)
+
+
+class _SvnWorker(QRunnable):
+    def __init__(
+        self, directory: str, action: str, paths: list[str], message: str,
+        credentials: tuple[str, str] | None = None,
+    ) -> None:
+        super().__init__()
+        self.directory = directory
+        self.action = action
+        self.paths = paths
+        self.message = message
+        self.credentials = credentials
+        self.authentication_required = False
+        self.signals = _VersionControlWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            from .svn_operations import SvnOperations
+
+            output = SvnOperations(self.directory, self.credentials).run(self.action, self.paths, self.message)
+        except Exception as error:
+            self.authentication_required = getattr(error, "authentication_required", False)
             self.signals.completed.emit(str(error), False)
         else:
             self.signals.completed.emit(output, True)
@@ -211,6 +239,9 @@ class ExplorerWindow(QMainWindow):
         self._git_worker: _GitWorker | None = None
         self._git_thread_pool = QThreadPool(self)
         self._git_thread_pool.setMaxThreadCount(1)
+        self._svn_worker: _SvnWorker | None = None
+        self._svn_thread_pool = QThreadPool(self)
+        self._svn_thread_pool.setMaxThreadCount(1)
         self._view_mode: str = "list"  # "list" or "thumbnail"
         self._showing_this_pc = False
         self._show_hidden = False
@@ -777,8 +808,8 @@ class ExplorerWindow(QMainWindow):
         self._update_status()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self._git_worker is not None:
-            QMessageBox.information(self, "Git", "Wait for the current Git operation to finish before closing.")
+        if self._git_worker is not None or self._svn_worker is not None:
+            QMessageBox.information(self, "Version Control", "Wait for the current version-control operation to finish before closing.")
             event.ignore()
             return
         for share in list(self._ftp_shares.values()):
@@ -964,6 +995,7 @@ class ExplorerWindow(QMainWindow):
         menu.addAction("Refresh", self.refresh)
         menu.addSeparator()
         self._add_git_menu(menu)
+        self._add_svn_menu(menu)
         self._add_show_hidden_action(menu)
         source = self.sender()
         if isinstance(source, (QTreeView, QListWidget)):
@@ -975,9 +1007,10 @@ class ExplorerWindow(QMainWindow):
     def _add_git_menu(self, menu: QMenu) -> None:
         git_menu = QMenu("Git", menu)
         menu.addMenu(git_menu)
-        git_menu.setEnabled(not self._showing_this_pc and self._git_worker is None)
+        git_menu.setEnabled(not self._showing_this_pc and self._git_worker is None and self._svn_worker is None)
         directory = self.current_path()
         for label, action in (
+            ("Clone Repository...", "clone"),
             ("Repository Status...", "status"),
             ("Staging...", "staging"),
             ("Unstaging...", "unstaging"),
@@ -987,13 +1020,23 @@ class ExplorerWindow(QMainWindow):
         ):
             git_menu.addAction(
                 label,
-                lambda checked=False, operation=action: self._start_git_operation(
-                    operation, directory, []
+                lambda checked=False, operation=action: (
+                    self._start_git_clone(directory) if operation == "clone" else
+                    self._start_git_operation(operation, directory, [])
                 ),
             )
 
+    def _start_git_clone(self, parent_directory: str) -> None:
+        if self._git_worker is not None or self._svn_worker is not None:
+            return
+        dialog = GitCloneDialog(parent_directory, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        url, destination = dialog.values()
+        self._start_git_operation("clone", str(Path(destination).parent), [url, destination])
+
     def _start_git_operation(self, action: str, directory: str, paths: list[str]) -> None:
-        if self._git_worker is not None:
+        if self._git_worker is not None or self._svn_worker is not None:
             return
         message = ""
         if action == "init":
@@ -1021,6 +1064,7 @@ class ExplorerWindow(QMainWindow):
     def _git_operation_finished(self, output: str | GitChanges, succeeded: bool) -> None:
         action = self._git_worker.action if self._git_worker is not None else ""
         directory = self._git_worker.directory if self._git_worker is not None else None
+        paths = self._git_worker.paths if self._git_worker is not None else []
         self._git_worker = None
         self._update_status()
         if not succeeded:
@@ -1042,11 +1086,111 @@ class ExplorerWindow(QMainWindow):
         if action == "status":
             self._show_git_output(str(output), directory)
         else:
+            if action == "clone" and len(paths) == 2:
+                self.navigate_to(paths[1], record_history=True)
             self._show_git_output(str(output))
 
     def _show_git_output(self, output: str, directory: str | None = None) -> None:
+        commands: dict[str, Callable[[], None]] = {}
+        if directory is not None:
+            for label, action in (("Push", "push"), ("Pull", "pull")):
+                commands[label] = lambda operation=action: self._start_git_operation(operation, directory, [])
+        self._show_command_output(output, "Repository Status" if directory is not None else "Git", commands)
+
+    def _add_svn_menu(self, menu: QMenu) -> None:
+        svn_menu = QMenu("SVN", menu)
+        menu.addMenu(svn_menu)
+        svn_menu.setEnabled(not self._showing_this_pc and self._git_worker is None and self._svn_worker is None)
+        directory = self.current_path()
+        paths = self.selected_paths()
+        for label, action in (
+            ("Checkout...", "checkout"),
+            ("Working Copy Status...", "status"),
+            ("Diff...", "diff"),
+            ("Add Selected", "add"),
+            ("Commit Selected...", "commit"),
+            ("Update", "update"),
+        ):
+            command = svn_menu.addAction(
+                label,
+                lambda checked=False, operation=action: (
+                    self._start_svn_checkout(directory) if operation == "checkout" else
+                    self._start_svn_operation(
+                        operation, directory, paths if operation in {"add", "commit", "diff"} else []
+                    )
+                ),
+            )
+            if action in {"add", "commit"}:
+                command.setEnabled(bool(paths))
+
+    def _start_svn_checkout(self, parent_directory: str) -> None:
+        if self._git_worker is not None or self._svn_worker is not None:
+            return
+        dialog = SvnCheckoutDialog(parent_directory, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        url, destination = dialog.values()
+        self._start_svn_operation("checkout", str(Path(destination).parent), [url, destination])
+
+    def _start_svn_operation(
+        self, action: str, directory: str, paths: list[str],
+        credentials: tuple[str, str] | None = None,
+    ) -> None:
+        if self._git_worker is not None or self._svn_worker is not None:
+            return
+        if action in {"add", "commit"} and not paths:
+            QMessageBox.warning(self, "SVN", "Select files or folders first.")
+            return
+        message = ""
+        if action == "commit":
+            message, accepted = QInputDialog.getMultiLineText(
+                self, "SVN Commit Selected", f"Commit message for {len(paths)} selected item(s):"
+            )
+            if not accepted:
+                return
+            if not message.strip():
+                QMessageBox.warning(self, "SVN", "A commit message is required.")
+                return
+        worker = _SvnWorker(directory, action, paths, message, credentials)
+        worker.signals.completed.connect(self._svn_operation_finished)
+        self._svn_worker = worker
+        self.status.showMessage("SVN operation in progress...")
+        self._svn_thread_pool.start(worker)
+
+    def _svn_operation_finished(self, output: str, succeeded: bool) -> None:
+        worker = self._svn_worker
+        self._svn_worker = None
+        self._update_status()
+        if not succeeded:
+            if worker is not None and worker.authentication_required and worker.credentials is None:
+                username, accepted = QInputDialog.getText(self, "SVN Authentication", "Username:")
+                if accepted and username.strip():
+                    password, accepted = QInputDialog.getText(
+                        self, "SVN Authentication", "Password:", QLineEdit.EchoMode.Password
+                    )
+                    if accepted:
+                        self._start_svn_operation(
+                            worker.action, worker.directory, worker.paths, (username.strip(), password)
+                        )
+                        return
+            QMessageBox.warning(self, "SVN Operation Failed", output)
+            return
+        commands: dict[str, Callable[[], None]] = {}
+        if worker is not None:
+            if worker.action == "status":
+                commands["Update"] = lambda: self._start_svn_operation("update", worker.directory, [])
+            if worker.action in {"add", "commit", "update"}:
+                self.refresh()
+            if worker.action == "checkout" and len(worker.paths) == 2:
+                self.navigate_to(worker.paths[1], record_history=True)
+        title = "SVN Working Copy Status" if worker is not None and worker.action == "status" else "SVN"
+        self._show_command_output(output, title, commands)
+
+    def _show_command_output(
+        self, output: str, title: str, commands: dict[str, Callable[[], None]]
+    ) -> None:
         dialog = QDialog(self)
-        dialog.setWindowTitle("Repository Status" if directory is not None else "Git")
+        dialog.setWindowTitle(title)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         dialog.resize(760, 480)
         layout = QVBoxLayout(dialog)
@@ -1057,16 +1201,14 @@ class ExplorerWindow(QMainWindow):
         text.setPlainText(output)
         layout.addWidget(text)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
-        if directory is not None:
-            def run_remote_operation(action: str) -> None:
-                dialog.accept()
-                self._start_git_operation(action, directory, [])
 
-            for label, action in (("Push", "push"), ("Pull", "pull")):
-                button = buttons.addButton(label, QDialogButtonBox.ButtonRole.ActionRole)
-                button.clicked.connect(
-                    lambda checked=False, operation=action: run_remote_operation(operation)
-                )
+        def run_command(command: Callable[[], None]) -> None:
+            dialog.accept()
+            command()
+
+        for label, command in commands.items():
+            button = buttons.addButton(label, QDialogButtonBox.ButtonRole.ActionRole)
+            button.clicked.connect(lambda checked=False, callback=command: run_command(callback))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         dialog.show()
