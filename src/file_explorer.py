@@ -38,6 +38,7 @@ from PySide6.QtGui import (
     QCloseEvent,
     QColor,
     QDesktopServices,
+    QFontDatabase,
     QIcon,
     QImage,
     QKeySequence,
@@ -54,6 +55,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QDialog,
+    QDialogButtonBox,
     QFileIconProvider,
     QFileSystemModel,
     QHBoxLayout,
@@ -65,6 +67,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -83,6 +86,7 @@ from .dialogs import (
     SshLocationDialog,
     FtpLocationDialog,
     FtpShareDialog,
+    GitStagingDialog,
     WindowsShareDialog,
     build_delete_confirmation_message,
     build_move_confirmation_message,
@@ -108,6 +112,9 @@ from .navigation_state import NavigationHistory
 from .drive_report import DriveReportWidget
 from .thumbnail_previews import ThumbnailPreviewProvider
 from .ui_theme import XPIconProvider, xp_stylesheet
+
+if TYPE_CHECKING:
+    from .git_operations import GitChanges
 
 
 class _ThumbnailWorkerSignals(QObject):
@@ -153,6 +160,30 @@ class _ThumbnailPreviewWorker(QRunnable):
         self.signals.finished.emit(self.token)
 
 
+class _GitWorkerSignals(QObject):
+    completed = Signal(object, bool)
+
+
+class _GitWorker(QRunnable):
+    def __init__(self, directory: str, action: str, paths: list[str], message: str) -> None:
+        super().__init__()
+        self.directory = directory
+        self.action = action
+        self.paths = paths
+        self.message = message
+        self.signals = _GitWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            from .git_operations import GitOperations
+
+            output = GitOperations(self.directory).run(self.action, self.paths, self.message)
+        except Exception as error:
+            self.signals.completed.emit(str(error), False)
+        else:
+            self.signals.completed.emit(output, True)
+
+
 class ExplorerWindow(QMainWindow):
     _FAVORITES_SETTINGS_KEY = "favorites/paths"
     _THIS_PC_HISTORY_ENTRY = "winfilexp://this-pc"
@@ -177,6 +208,9 @@ class ExplorerWindow(QMainWindow):
         self.navigation_history = NavigationHistory()
         self._clipboard_paths: list[str] = []
         self._clipboard_mode: str | None = None
+        self._git_worker: _GitWorker | None = None
+        self._git_thread_pool = QThreadPool(self)
+        self._git_thread_pool.setMaxThreadCount(1)
         self._view_mode: str = "list"  # "list" or "thumbnail"
         self._showing_this_pc = False
         self._show_hidden = False
@@ -743,6 +777,10 @@ class ExplorerWindow(QMainWindow):
         self._update_status()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._git_worker is not None:
+            QMessageBox.information(self, "Git", "Wait for the current Git operation to finish before closing.")
+            event.ignore()
+            return
         for share in list(self._ftp_shares.values()):
             share.stop()
         self._ftp_shares.clear()
@@ -925,6 +963,7 @@ class ExplorerWindow(QMainWindow):
         menu.addAction("Open Terminal", self.open_terminal)
         menu.addAction("Refresh", self.refresh)
         menu.addSeparator()
+        self._add_git_menu(menu)
         self._add_show_hidden_action(menu)
         source = self.sender()
         if isinstance(source, (QTreeView, QListWidget)):
@@ -932,6 +971,105 @@ class ExplorerWindow(QMainWindow):
         else:
             global_pos = self.mapToGlobal(pos)
         menu.exec(global_pos)
+
+    def _add_git_menu(self, menu: QMenu) -> None:
+        git_menu = QMenu("Git", menu)
+        menu.addMenu(git_menu)
+        git_menu.setEnabled(not self._showing_this_pc and self._git_worker is None)
+        directory = self.current_path()
+        for label, action in (
+            ("Repository Status...", "status"),
+            ("Staging...", "staging"),
+            ("Unstaging...", "unstaging"),
+            ("View Staged Changes...", "diff"),
+            ("Commit Staged Changes...", "commit"),
+            ("Initialize Repository Here...", "init"),
+        ):
+            git_menu.addAction(
+                label,
+                lambda checked=False, operation=action: self._start_git_operation(
+                    operation, directory, []
+                ),
+            )
+
+    def _start_git_operation(self, action: str, directory: str, paths: list[str]) -> None:
+        if self._git_worker is not None:
+            return
+        message = ""
+        if action == "init":
+            answer = QMessageBox.question(
+                self, "Initialize Git Repository", f"Create a Git repository in this folder?\n\n{directory}",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        elif action == "commit":
+            message, accepted = QInputDialog.getMultiLineText(
+                self, "Commit Staged Changes", "Commit message (only staged changes will be committed):"
+            )
+            if not accepted:
+                return
+            if not message.strip():
+                QMessageBox.warning(self, "Git", "A commit message is required.")
+                return
+        worker = _GitWorker(directory, action, paths, message)
+        worker.signals.completed.connect(self._git_operation_finished)
+        self._git_worker = worker
+        self.status.showMessage("Git operation in progress...")
+        self._git_thread_pool.start(worker)
+
+    def _git_operation_finished(self, output: str | GitChanges, succeeded: bool) -> None:
+        action = self._git_worker.action if self._git_worker is not None else ""
+        directory = self._git_worker.directory if self._git_worker is not None else None
+        self._git_worker = None
+        self._update_status()
+        if not succeeded:
+            QMessageBox.warning(self, "Git Operation Failed", str(output))
+            return
+        if action in {"staging", "unstaging"}:
+            from .git_operations import GitChanges
+
+            if not isinstance(output, GitChanges):
+                return
+            operation = "stage" if action == "staging" else "unstage"
+            dialog = GitStagingDialog(output, operation, self)
+            if dialog.exec() == QDialog.Accepted:
+                paths = dialog.selected_paths()
+                if paths:
+                    self._start_git_operation(operation, output.root, paths)
+            dialog.deleteLater()
+            return
+        if action == "status":
+            self._show_git_output(str(output), directory)
+        else:
+            self._show_git_output(str(output))
+
+    def _show_git_output(self, output: str, directory: str | None = None) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Repository Status" if directory is not None else "Git")
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.resize(760, 480)
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit(dialog)
+        text.setReadOnly(True)
+        text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        text.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        text.setPlainText(output)
+        layout.addWidget(text)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+        if directory is not None:
+            def run_remote_operation(action: str) -> None:
+                dialog.accept()
+                self._start_git_operation(action, directory, [])
+
+            for label, action in (("Push", "push"), ("Pull", "pull")):
+                button = buttons.addButton(label, QDialogButtonBox.ButtonRole.ActionRole)
+                button.clicked.connect(
+                    lambda checked=False, operation=action: run_remote_operation(operation)
+                )
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.show()
 
     def _show_favorites_context_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)

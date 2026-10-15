@@ -29,10 +29,12 @@ A minimal Windows XP-style file explorer starter for macOS using Python and PySi
 - Right pane supports multi-selection for bulk move/delete
 - Favorites are persisted across launches (bookmarks are restored on startup)
 - Favorites can be re-ordered by drag-and-drop
+- Git context menu: repository status, stage/unstage selected items, staged diffs, commits, and repository initialization
 
 ## Requirements
 
 - Python 3.10+
+- Git installed and available on `PATH` for Git operations (also required for packaged applications)
 
 ## Run
 
@@ -55,6 +57,35 @@ python -m src.main
 - Add a bookmark by dragging a folder from *File System* or *Network* into *Favorites*.
 - Right-click a folder in *File System* or *Network* and choose **Add to Favorites**.
 - On first launch, *Favorites* is pre-populated with Home, Desktop, and Downloads (if they exist).
+
+## Git Integration
+
+Right-click in the file pane and open **Git**. Repository actions use the repository
+containing the current folder, including when browsing a subfolder. **Staging...**
+and **Unstaging...** are available without selecting files in the explorer.
+**Staging...** lists repository-wide **Modified Files** and **Untracked Files** in
+separate sections: check files and click **Stage**. **Unstaging...** lists staged
+files with their boxes checked: uncheck files and click **Unstage** to remove them
+from staging. **Close** leaves the index unchanged. Unstaging preserves working
+files, including before the first commit. **View Staged Changes** shows the changes
+that **Commit Staged Changes** will commit; other working changes are not included.
+
+**Repository Status** includes **Push**, **Pull**, and **Close** buttons. Push and
+Pull use the repository's configured remote and upstream branch; configure these
+with Git first (for example, `git push --set-upstream origin <branch>`). Pull is
+fast-forward-only and refuses divergent history rather than creating a merge.
+Commands use existing Git authentication without terminal credential prompts,
+and display their output or errors in a dialog.
+
+**Initialize Repository Here** creates a repository in the current folder after
+confirmation, but refuses folders already inside a repository. Git commands run
+in a background worker. Missing Git, repository errors, hook failures, and missing
+commit identity are reported in a dialog. Configure identity with `git config
+--global user.name "Your Name"` and `git config --global user.email "you@example.com"`.
+
+This initial increment uses GitPython and standard Git, without hosting-service
+APIs. Status overlays, branch management, clone, and standalone fetch are not yet
+implemented. No discard, hard-reset, or force-push actions are exposed.
 
 ## Build
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent
@@ -11,11 +12,72 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QSpinBox,
     QVBoxLayout,
 )
+
+if TYPE_CHECKING:
+    from .git_operations import GitChanges
+
+
+class GitStagingDialog(QDialog):
+    def __init__(self, changes: GitChanges, action: str, parent: QMainWindow | None = None) -> None:
+        super().__init__(parent)
+        self.action = action
+        self.setWindowTitle("Staging" if action == "stage" else "Unstaging")
+        self.resize(760, 480)
+        layout = QVBoxLayout(self)
+        repository_label = QLabel(changes.root, self)
+        repository_label.setWordWrap(True)
+        layout.addWidget(repository_label)
+        self.file_lists: list[QListWidget] = []
+        sections = (
+            [("Modified Files", changes.modified), ("Untracked Files", changes.untracked)]
+            if action == "stage" else [("Staged Files", changes.staged)]
+        )
+        for title, entries in sections:
+            layout.addWidget(QLabel(f"{title} ({len(entries)})", self))
+            file_list = QListWidget(self)
+            file_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+            self.file_lists.append(file_list)
+            for change in entries:
+                label = f"{change.original_path} -> {change.path}" if change.original_path else change.path
+                item = QListWidgetItem(label, file_list)
+                paths = [str(Path(changes.root) / change.path)]
+                if change.original_path:
+                    paths.append(str(Path(changes.root) / change.original_path))
+                item.setData(Qt.ItemDataRole.UserRole, paths)
+                item.setToolTip(label)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Unchecked if action == "stage" else Qt.CheckState.Checked)
+            file_list.itemChanged.connect(self._update_action_button)
+            layout.addWidget(file_list)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        self.action_button = buttons.addButton(
+            "Stage" if action == "stage" else "Unstage", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        self.action_button.setAutoDefault(False)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._update_action_button()
+
+    def selected_paths(self) -> list[str]:
+        target_state = Qt.CheckState.Checked if self.action == "stage" else Qt.CheckState.Unchecked
+        paths: list[str] = []
+        for file_list in self.file_lists:
+            for row in range(file_list.count()):
+                item = file_list.item(row)
+                if item.checkState() == target_state:
+                    paths.extend(item.data(Qt.ItemDataRole.UserRole))
+        return list(dict.fromkeys(paths))
+
+    def _update_action_button(self) -> None:
+        self.action_button.setEnabled(bool(self.selected_paths()))
 
 
 def selection_preview(paths: list[str], max_items: int = 3) -> str:
