@@ -62,8 +62,9 @@ python -m src.main
 
 ## Git Integration
 
-Right-click in the file pane and open **Git**. **Clone Repository...** accepts an
-HTTPS, SSH, `git://`, or local repository URL and checks it out into a chosen
+Right-click in the file pane and open **Git**. Less-used **Clone Repository...**
+and **Initialize Repository Here...** actions are under **More**. Clone accepts
+an HTTPS, SSH, `git://`, or local repository URL and checks it out into a chosen
 parent folder. The destination name is suggested from the URL and can be edited;
 the destination must be new or empty. Use a configured Git credential helper or
 SSH agent for private repositories; terminal prompts are disabled.
@@ -72,16 +73,22 @@ Other repository actions use the repository containing the current folder,
 including when browsing a subfolder. **Staging...**
 and **Unstaging...** are available without selecting files in the explorer.
 **Staging...** lists repository-wide **Modified Files** and **Untracked Files** in
-separate sections: check files and click **Stage**. **Unstaging...** lists staged
-files with their boxes checked: uncheck files and click **Unstage** to remove them
-from staging. **Close** leaves the index unchanged. Unstaging preserves working
-files, including before the first commit. **View Staged Changes** shows the changes
-that **Commit Staged Changes** will commit; other working changes are not included.
+separate sections: check files and click **Stage**; each section has **Check All**
+and **Uncheck All** controls. **Unstaging...** lists staged files unchecked: check
+the files to remove from staging, or use **Check All** to select every staged file.
+**Uncheck All** clears the selection. **Close** leaves the index unchanged.
+Unstaging preserves working files, including before the first commit. **View Staged
+Changes** shows the changes that **Commit Staged Changes** will commit; other
+working changes are not included.
 
-**Repository Status** includes **Push**, **Pull**, and **Close** buttons. Push and
-Pull use the repository's configured remote and upstream branch; configure these
-with Git first (for example, `git push --set-upstream origin <branch>`). Pull is
-fast-forward-only and refuses divergent history rather than creating a merge.
+**Repository Status** shows local changes and the current branch. Switch between
+local branches, select a remote branch and create a tracking branch (the local
+name is editable), or create and switch to a local branch without an upstream.
+Branches without an upstream can be published to a selected remote, which also
+sets the upstream (equivalent to `git push -u origin <branch>`). Switches that
+would overwrite local changes are refused by Git. **Fetch** updates and prunes
+remote branch references; **Push** and **Pull** use the configured remote and
+upstream. Pull is fast-forward-only and refuses divergent history.
 Commands use existing Git authentication without terminal credential prompts,
 and display their output or errors in a dialog.
 
@@ -92,8 +99,8 @@ commit identity are reported in a dialog. Configure identity with `git config
 --global user.name "Your Name"` and `git config --global user.email "you@example.com"`.
 
 This initial increment uses GitPython and standard Git, without hosting-service
-APIs. Status overlays, branch management, and standalone fetch are not yet
-implemented. No discard, hard-reset, or force-push actions are exposed.
+APIs. Status overlays are not yet implemented. No discard, hard-reset, or
+force-push actions are exposed.
 
 ## SVN Integration
 

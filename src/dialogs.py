@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import SplitResult, unquote, urlsplit
@@ -8,10 +9,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -19,35 +22,59 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QSpinBox,
     QPushButton,
     QVBoxLayout,
 )
 
 if TYPE_CHECKING:
-    from .git_operations import GitChanges
+    from .git_operations import GitBranchInfo, GitChanges
 
 
 class GitStagingDialog(QDialog):
     def __init__(self, changes: GitChanges, action: str, parent: QMainWindow | None = None) -> None:
         super().__init__(parent)
         self.action = action
-        self.setWindowTitle("Staging" if action == "stage" else "Unstaging")
+        title = "Staging" if action == "stage" else "Unstaging"
+        if changes.branch:
+            title = f"{title} - {changes.branch}"
+        self.setWindowTitle(title)
         self.resize(760, 480)
         layout = QVBoxLayout(self)
         repository_label = QLabel(changes.root, self)
         repository_label.setWordWrap(True)
         layout.addWidget(repository_label)
         self.file_lists: list[QListWidget] = []
+        self.check_all_buttons: list[QPushButton] = []
+        self.uncheck_all_buttons: list[QPushButton] = []
         sections = (
             [("Modified Files", changes.modified), ("Untracked Files", changes.untracked)]
             if action == "stage" else [("Staged Files", changes.staged)]
         )
         for title, entries in sections:
-            layout.addWidget(QLabel(f"{title} ({len(entries)})", self))
             file_list = QListWidget(self)
             file_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
             self.file_lists.append(file_list)
+            section_header = QHBoxLayout()
+            section_title = f"{title} ({len(entries)})"
+            if action == "unstage":
+                section_title += ", please check files you want to unstage"
+            section_header.addWidget(QLabel(section_title, self))
+            section_header.addStretch()
+            check_all_button = QPushButton("Check All", self)
+            check_all_button.clicked.connect(
+                lambda checked=False, target=file_list: self._check_all(target)
+            )
+            self.check_all_buttons.append(check_all_button)
+            section_header.addWidget(check_all_button)
+            uncheck_all_button = QPushButton("Uncheck All", self)
+            uncheck_all_button.clicked.connect(
+                lambda checked=False, target=file_list: self._uncheck_all(target)
+            )
+            self.uncheck_all_buttons.append(uncheck_all_button)
+            section_header.addWidget(uncheck_all_button)
+            layout.addLayout(section_header)
             for change in entries:
                 label = f"{change.original_path} -> {change.path}" if change.original_path else change.path
                 item = QListWidgetItem(label, file_list)
@@ -57,7 +84,7 @@ class GitStagingDialog(QDialog):
                 item.setData(Qt.ItemDataRole.UserRole, paths)
                 item.setToolTip(label)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(Qt.CheckState.Unchecked if action == "stage" else Qt.CheckState.Checked)
+                item.setCheckState(Qt.CheckState.Unchecked)
             file_list.itemChanged.connect(self._update_action_button)
             layout.addWidget(file_list)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
@@ -71,17 +98,167 @@ class GitStagingDialog(QDialog):
         self._update_action_button()
 
     def selected_paths(self) -> list[str]:
-        target_state = Qt.CheckState.Checked if self.action == "stage" else Qt.CheckState.Unchecked
         paths: list[str] = []
         for file_list in self.file_lists:
             for row in range(file_list.count()):
                 item = file_list.item(row)
-                if item.checkState() == target_state:
+                if item.checkState() == Qt.CheckState.Checked:
                     paths.extend(item.data(Qt.ItemDataRole.UserRole))
         return list(dict.fromkeys(paths))
 
     def _update_action_button(self) -> None:
         self.action_button.setEnabled(bool(self.selected_paths()))
+        for check_button, uncheck_button, file_list in zip(
+            self.check_all_buttons, self.uncheck_all_buttons, self.file_lists
+        ):
+            states = [file_list.item(row).checkState() for row in range(file_list.count())]
+            check_button.setEnabled(any(state != Qt.CheckState.Checked for state in states))
+            uncheck_button.setEnabled(any(state == Qt.CheckState.Checked for state in states))
+
+    @staticmethod
+    def _check_all(file_list: QListWidget) -> None:
+        for row in range(file_list.count()):
+            file_list.item(row).setCheckState(Qt.CheckState.Checked)
+
+    @staticmethod
+    def _uncheck_all(file_list: QListWidget) -> None:
+        for row in range(file_list.count()):
+            file_list.item(row).setCheckState(Qt.CheckState.Unchecked)
+
+
+class GitRepositoryStatusDialog(QDialog):
+    def __init__(
+        self,
+        status: str,
+        branches: GitBranchInfo,
+        operation_callback: Callable[[str, list[str]], None],
+        parent: QMainWindow | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Repository Status")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.resize(760, 620)
+        self.operation_callback = operation_callback
+        self.current_branch = branches.current
+        layout = QVBoxLayout(self)
+        current_branch = branches.current if branches.current is not None else "Detached HEAD"
+        layout.addWidget(QLabel(f"Current branch: {current_branch}", self))
+
+        self.publish_group = QGroupBox("Publish current branch", self)
+        publish_layout = QHBoxLayout(self.publish_group)
+        self.publish_remote_combo = QComboBox(self.publish_group)
+        self.publish_remote_combo.addItems(branches.remotes)
+        if self.publish_remote_combo.findText("origin") >= 0:
+            self.publish_remote_combo.setCurrentText("origin")
+        if not branches.remotes:
+            self.publish_remote_combo.addItem("No remotes configured")
+            self.publish_remote_combo.setEnabled(False)
+        self.publish_button = QPushButton("Publish Branch", self.publish_group)
+        self.publish_button.clicked.connect(self._publish_current_branch)
+        publish_layout.addWidget(QLabel("Remote:", self.publish_group))
+        publish_layout.addWidget(self.publish_remote_combo, 1)
+        publish_layout.addWidget(self.publish_button)
+        self.publish_group.setVisible(branches.current is not None and branches.upstream is None)
+        self.publish_button.setEnabled(bool(branches.current and branches.remotes))
+        layout.addWidget(self.publish_group)
+
+        local_group = QGroupBox("Local branches", self)
+        local_layout = QHBoxLayout(local_group)
+        self.local_branch_combo = QComboBox(local_group)
+        self.local_branch_combo.addItems(branches.local)
+        if branches.current is not None:
+            index = self.local_branch_combo.findText(branches.current)
+            if index >= 0:
+                self.local_branch_combo.setCurrentIndex(index)
+        self.switch_button = QPushButton("Switch", local_group)
+        self.switch_button.clicked.connect(self._switch_branch)
+        self.local_branch_combo.currentTextChanged.connect(self._update_switch_button)
+        local_layout.addWidget(self.local_branch_combo, 1)
+        local_layout.addWidget(self.switch_button)
+        layout.addWidget(local_group)
+
+        remote_group = QGroupBox("Remote branches", self)
+        remote_layout = QFormLayout(remote_group)
+        self.remote_branch_combo = QComboBox(remote_group)
+        self.local_tracking_name = QLineEdit(remote_group)
+        for remote_ref, local_name in branches.remote:
+            self.remote_branch_combo.addItem(remote_ref, (remote_ref, local_name))
+        if branches.remote:
+            self.local_tracking_name.setText(branches.remote[0][1])
+        self.remote_branch_combo.currentIndexChanged.connect(self._update_tracking_name)
+        self.track_button = QPushButton("Create Tracking Branch", remote_group)
+        self.track_button.clicked.connect(self._track_remote_branch)
+        self.remote_branch_combo.currentIndexChanged.connect(self._update_track_button)
+        self.local_tracking_name.textChanged.connect(self._update_track_button)
+        remote_layout.addRow("Remote branch:", self.remote_branch_combo)
+        remote_layout.addRow("Local branch name:", self.local_tracking_name)
+        remote_layout.addRow("", self.track_button)
+        layout.addWidget(remote_group)
+
+        create_group = QGroupBox("Create an unlinked local branch", self)
+        create_layout = QHBoxLayout(create_group)
+        self.new_branch_name = QLineEdit(create_group)
+        self.new_branch_name.setPlaceholderText("Branch name")
+        self.create_branch_button = QPushButton("Create and Switch", create_group)
+        self.create_branch_button.clicked.connect(self._create_local_branch)
+        self.new_branch_name.textChanged.connect(
+            lambda name: self.create_branch_button.setEnabled(bool(name.strip()))
+        )
+        self.create_branch_button.setEnabled(False)
+        create_layout.addWidget(self.new_branch_name, 1)
+        create_layout.addWidget(self.create_branch_button)
+        layout.addWidget(create_group)
+
+        self.status_text = QPlainTextEdit(self)
+        self.status_text.setReadOnly(True)
+        self.status_text.setPlainText(status)
+        layout.addWidget(self.status_text, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        for label, action in (("Fetch", "fetch"), ("Push", "push"), ("Pull", "pull")):
+            button = buttons.addButton(label, QDialogButtonBox.ButtonRole.ActionRole)
+            button.clicked.connect(lambda checked=False, operation=action: self._run_operation(operation, []))
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._update_switch_button()
+        self._update_track_button()
+
+    def _update_switch_button(self) -> None:
+        self.switch_button.setEnabled(
+            bool(self.local_branch_combo.currentText())
+            and self.local_branch_combo.currentText() != self.current_branch
+        )
+
+    def _update_tracking_name(self, index: int) -> None:
+        branch = self.remote_branch_combo.itemData(index)
+        if branch is not None:
+            self.local_tracking_name.setText(branch[1])
+        self._update_track_button()
+
+    def _update_track_button(self) -> None:
+        self.track_button.setEnabled(
+            self.remote_branch_combo.currentIndex() >= 0 and bool(self.local_tracking_name.text().strip())
+        )
+
+    def _switch_branch(self) -> None:
+        self._run_operation("switch", [self.local_branch_combo.currentText()])
+
+    def _track_remote_branch(self) -> None:
+        branch = self.remote_branch_combo.currentData()
+        if branch is not None:
+            self._run_operation("track", [branch[0], self.local_tracking_name.text().strip()])
+
+    def _create_local_branch(self) -> None:
+        self._run_operation("create_branch", [self.new_branch_name.text().strip()])
+
+    def _publish_current_branch(self) -> None:
+        remote = self.publish_remote_combo.currentText()
+        if remote and self.current_branch:
+            self._run_operation("publish", [remote, self.current_branch])
+
+    def _run_operation(self, action: str, paths: list[str]) -> None:
+        self.accept()
+        self.operation_callback(action, paths)
 
 
 class SvnCheckoutDialog(QDialog):

@@ -177,9 +177,12 @@ class _GitWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            from .git_operations import GitOperations
+            from .git_operations import GitOperations, GitRepositoryStatus
 
-            output = GitOperations(self.directory).run(self.action, self.paths, self.message)
+            operations = GitOperations(self.directory)
+            output = operations.run(self.action, self.paths, self.message)
+            if self.action == "status":
+                output = GitRepositoryStatus(str(output), operations.branch_info())
         except Exception as error:
             self.signals.completed.emit(str(error), False)
         else:
@@ -1010,21 +1013,28 @@ class ExplorerWindow(QMainWindow):
         git_menu.setEnabled(not self._showing_this_pc and self._git_worker is None and self._svn_worker is None)
         directory = self.current_path()
         for label, action in (
-            ("Clone Repository...", "clone"),
             ("Repository Status...", "status"),
             ("Staging...", "staging"),
             ("Unstaging...", "unstaging"),
             ("View Staged Changes...", "diff"),
             ("Commit Staged Changes...", "commit"),
-            ("Initialize Repository Here...", "init"),
         ):
             git_menu.addAction(
                 label,
-                lambda checked=False, operation=action: (
-                    self._start_git_clone(directory) if operation == "clone" else
-                    self._start_git_operation(operation, directory, [])
+                lambda checked=False, operation=action: self._start_git_operation(
+                    operation, directory, []
                 ),
             )
+        more_menu = QMenu("More", git_menu)
+        git_menu.addMenu(more_menu)
+        more_menu.addAction(
+            "Clone Repository...",
+            lambda checked=False: self._start_git_clone(directory),
+        )
+        more_menu.addAction(
+            "Initialize Repository Here...",
+            lambda checked=False: self._start_git_operation("init", directory, []),
+        )
 
     def _start_git_clone(self, parent_directory: str) -> None:
         if self._git_worker is not None or self._svn_worker is not None:
@@ -1084,18 +1094,38 @@ class ExplorerWindow(QMainWindow):
             dialog.deleteLater()
             return
         if action == "status":
-            self._show_git_output(str(output), directory)
+            from .git_operations import GitRepositoryStatus
+
+            if isinstance(output, GitRepositoryStatus):
+                self._show_git_output(output.text, directory, output.branches)
+            else:
+                self._show_git_output(str(output), directory)
+        elif action in {"switch", "track", "create_branch", "fetch", "publish"}:
+            self.status.showMessage(str(output), 4000)
+            if directory is not None:
+                self._start_git_operation("status", directory, [])
         else:
             if action == "clone" and len(paths) == 2:
                 self.navigate_to(paths[1], record_history=True)
             self._show_git_output(str(output))
 
-    def _show_git_output(self, output: str, directory: str | None = None) -> None:
-        commands: dict[str, Callable[[], None]] = {}
-        if directory is not None:
-            for label, action in (("Push", "push"), ("Pull", "pull")):
-                commands[label] = lambda operation=action: self._start_git_operation(operation, directory, [])
-        self._show_command_output(output, "Repository Status" if directory is not None else "Git", commands)
+    def _show_git_output(
+        self, output: str, directory: str | None = None, branches: object | None = None
+    ) -> None:
+        if directory is None:
+            self._show_command_output(output, "Git", {})
+            return
+        from .dialogs import GitRepositoryStatusDialog
+        from .git_operations import GitBranchInfo
+
+        branch_info = branches if isinstance(branches, GitBranchInfo) else GitBranchInfo(None, [], [])
+        dialog = GitRepositoryStatusDialog(
+            output,
+            branch_info,
+            lambda action, paths: self._start_git_operation(action, directory, paths),
+            self,
+        )
+        dialog.show()
 
     def _add_svn_menu(self, menu: QMenu) -> None:
         svn_menu = QMenu("SVN", menu)

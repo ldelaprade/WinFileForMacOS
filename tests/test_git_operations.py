@@ -63,6 +63,89 @@ class GitOperationsTests(unittest.TestCase):
                 self.operations.run("clone", [url, str(target)])
         self.assertEqual((destination / "keep.txt").read_text(), "keep\n")
 
+    def test_branch_list_create_switch_and_track_remote(self):
+        path = self.write_file("tracked.txt")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Initial branch commit")
+        main_branch = self.repository.active_branch.name
+        self.operations.run("create_branch", ["local-only"])
+        self.assertEqual(self.repository.active_branch.name, "local-only")
+        self.assertIsNone(self.repository.active_branch.tracking_branch())
+
+        with tempfile.TemporaryDirectory() as directory:
+            with Repo.init(Path(directory) / "remote.git", bare=True) as remote:
+                self.repository.create_remote("origin", remote.git_dir)
+                self.repository.git.push("origin", "local-only:remote-feature")
+                self.operations.run("switch", [main_branch])
+
+                info = self.operations.branch_info()
+                remote_feature = next(item for item in info.remote if item[1] == "remote-feature")
+                self.assertEqual(info.current, main_branch)
+                self.assertEqual(set(info.local), {main_branch, "local-only"})
+                self.assertNotIn(("origin/HEAD", "HEAD"), info.remote)
+
+                self.operations.run("track", list(remote_feature))
+                self.assertEqual(self.repository.active_branch.name, "remote-feature")
+                tracking = self.repository.active_branch.tracking_branch()
+                self.assertEqual(tracking.name, remote_feature[0])
+
+    def test_tracking_remote_branch_allows_custom_local_name_and_missing_remote_fails(self):
+        path = self.write_file("tracked.txt")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Initial branch commit")
+        branch = self.repository.active_branch.name
+        with tempfile.TemporaryDirectory() as directory:
+            with Repo.init(Path(directory) / "remote.git", bare=True) as remote:
+                self.repository.create_remote("origin", remote.git_dir)
+                self.repository.git.push("--set-upstream", "origin", branch)
+                with self.assertRaisesRegex(GitOperationError, "does not exist"):
+                    self.operations.run("track", ["origin/missing", "custom"])
+                self.operations.run("track", [f"origin/{branch}", "custom-local"])
+                self.assertEqual(self.repository.active_branch.name, "custom-local")
+                self.assertEqual(
+                    self.repository.active_branch.tracking_branch().name,
+                    f"origin/{branch}",
+                )
+
+    def test_publish_branch_sets_upstream_and_rejects_unknown_remote(self):
+        path = self.write_file("tracked.txt")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Initial publish commit")
+        self.operations.run("create_branch", ["git2"])
+        with tempfile.TemporaryDirectory() as directory:
+            with Repo.init(Path(directory) / "remote.git", bare=True) as remote:
+                self.repository.create_remote("origin", remote.git_dir)
+                info = self.operations.branch_info()
+                self.assertEqual(info.current, "git2")
+                self.assertIsNone(info.upstream)
+                self.assertEqual(info.remotes, ["origin"])
+                with self.assertRaisesRegex(GitOperationError, "does not exist"):
+                    self.operations.run("publish", ["missing", "git2"])
+
+                output = self.operations.run("publish", ["origin", "git2"])
+
+                self.assertIn("set its upstream", output)
+                self.assertEqual(self.repository.active_branch.tracking_branch().name, "origin/git2")
+                self.assertEqual(remote.commit("git2"), self.repository.head.commit)
+
+    def test_branch_switch_preserves_changes_and_invalid_branch_names_fail(self):
+        path = self.write_file("tracked.txt", "initial\n")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Initial branch commit")
+        current = self.repository.active_branch.name
+        self.operations.run("create_branch", ["other"])
+        Path(path).write_text("other branch content\n")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Different branch contents")
+        self.operations.run("switch", [current])
+        Path(path).write_text("local change\n")
+        with self.assertRaises(GitOperationError):
+            self.operations.run("switch", ["other"])
+        self.assertEqual(self.repository.active_branch.name, current)
+        for action, paths in (("create_branch", ["bad..name"]), ("switch", ["missing"])):
+            with self.subTest(action=action), self.assertRaises(GitOperationError):
+                self.operations.run(action, paths)
+
     def test_timeout_options_are_platform_aware(self):
         for platform in ("win32", "darwin", "linux"):
             for seconds in (30, 120):
@@ -93,6 +176,7 @@ class GitOperationsTests(unittest.TestCase):
         self.assertEqual({change.path for change in changes.modified}, {"modified.txt", "deleted.txt"})
         self.assertEqual({change.path for change in changes.untracked}, {".gitignore", "new\nfile.txt"})
         self.assertEqual([change.path for change in changes.staged], ["modified.txt"])
+        self.assertEqual(changes.branch, self.repository.active_branch.name)
 
     def test_changes_before_first_commit_and_empty_repository(self):
         self.assertEqual(self.operations.run("staging").staged, [])
@@ -230,6 +314,22 @@ class GitOperationsTests(unittest.TestCase):
             with self.subTest(action=action), self.assertRaises(GitOperationError):
                 self.operations.run(action)
 
+    def test_fetch_prunes_remote_tracking_branches(self):
+        path = self.write_file("tracked.txt")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Initial fetch source")
+        with tempfile.TemporaryDirectory() as directory:
+            with Repo.init(Path(directory) / "remote.git", bare=True) as remote:
+                self.repository.create_remote("origin", remote.git_dir)
+                branch = self.repository.active_branch.name
+                self.repository.git.push("--set-upstream", "origin", branch)
+                self.assertTrue(any(ref.startswith("origin/") for ref, _ in self.operations.branch_info().remote))
+                self.repository.git.push("origin", ":refs/heads/obsolete")
+                self.operations.run("fetch")
+                self.assertNotIn(
+                    ("origin/obsolete", "obsolete"), self.operations.branch_info().remote
+                )
+
 
 class GitExplorerIntegrationTests(unittest.TestCase):
     @classmethod
@@ -254,12 +354,18 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         with patch.object(self.window, "selected_paths", return_value=[]):
             self.window._add_git_menu(menu)
         actions = menu.actions()[0].menu().actions()
-        self.assertEqual(actions[0].text(), "Clone Repository...")
+        self.assertEqual([action.text() for action in actions[:5]], [
+            "Repository Status...", "Staging...", "Unstaging...",
+            "View Staged Changes...", "Commit Staged Changes...",
+        ])
+        self.assertEqual(actions[5].text(), "More")
+        self.assertEqual(
+            [action.text() for action in actions[5].menu().actions()],
+            ["Clone Repository...", "Initialize Repository Here..."],
+        )
+        self.assertTrue(actions[1].isEnabled())
         self.assertTrue(actions[2].isEnabled())
-        self.assertTrue(actions[3].isEnabled())
-        self.assertEqual(actions[2].text(), "Staging...")
-        self.assertEqual(actions[3].text(), "Unstaging...")
-        self.assertTrue(actions[0].isEnabled())
+        self.assertTrue(actions[5].isEnabled())
 
     def test_menu_uses_current_folder_not_selection(self):
         from PySide6.QtWidgets import QMenu
@@ -270,10 +376,10 @@ class GitExplorerIntegrationTests(unittest.TestCase):
             self.window, "selected_paths", return_value=paths
         ), patch.object(self.window, "_start_git_operation") as start:
             self.window._add_git_menu(menu)
-            menu.actions()[0].menu().actions()[2].trigger()
+            menu.actions()[0].menu().actions()[1].trigger()
             start.assert_called_once_with("staging", self.temporary.name, [])
             start.reset_mock()
-            menu.actions()[0].menu().actions()[3].trigger()
+            menu.actions()[0].menu().actions()[2].trigger()
             start.assert_called_once_with("unstaging", self.temporary.name, [])
 
     def test_git_clone_dialog_suggests_folder_from_https_and_ssh_urls(self):
@@ -295,6 +401,90 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         dialog.url_edit.setText("https://github.com/owner/changed.git")
         self.assertEqual(dialog.folder_name_edit.text(), "custom-name")
 
+    def test_repository_status_dialog_runs_branch_actions(self):
+        from PySide6.QtWidgets import QComboBox, QDialogButtonBox, QLineEdit, QPushButton
+        from src.dialogs import GitRepositoryStatusDialog
+        from src.git_operations import GitBranchInfo
+
+        calls = []
+        branches = GitBranchInfo(
+            "main", ["dev", "main"], [("origin/feature/device", "feature/device")]
+        )
+        dialog = GitRepositoryStatusDialog("On branch main", branches, lambda *args: calls.append(args), self.window)
+        self.addCleanup(dialog.close)
+        local_combo = dialog.local_branch_combo
+        remote_combo = dialog.remote_branch_combo
+        self.assertEqual(local_combo.currentText(), "main")
+        self.assertEqual(remote_combo.currentText(), "origin/feature/device")
+        local_combo.setCurrentText("dev")
+        switch_button = next(button for button in dialog.findChildren(QPushButton) if button.text() == "Switch")
+        switch_button.click()
+        self.assertEqual(calls[-1], ("switch", ["dev"]))
+        self.assertFalse(dialog.isVisible())
+
+        dialog = GitRepositoryStatusDialog("On branch main", branches, lambda *args: calls.append(args), self.window)
+        self.addCleanup(dialog.close)
+        dialog.findChildren(QComboBox)[0].setCurrentText("dev")
+        next(button for button in dialog.findChildren(QPushButton) if button.text() == "Switch").click()
+        self.assertEqual(calls[-1], ("switch", ["dev"]))
+
+        dialog = GitRepositoryStatusDialog("On branch main", branches, lambda *args: calls.append(args), self.window)
+        self.addCleanup(dialog.close)
+        next(field for field in dialog.findChildren(QLineEdit) if field is not dialog.status_text).setText("local/device")
+        next(
+            button for button in dialog.findChildren(QPushButton)
+            if button.text() == "Create Tracking Branch"
+        ).click()
+        self.assertEqual(calls[-1], ("track", ["origin/feature/device", "local/device"]))
+
+        dialog = GitRepositoryStatusDialog("On branch main", branches, lambda *args: calls.append(args), self.window)
+        self.addCleanup(dialog.close)
+        dialog.new_branch_name.setText("private-work")
+        next(button for button in dialog.findChildren(QPushButton) if button.text() == "Create and Switch").click()
+        self.assertEqual(calls[-1], ("create_branch", ["private-work"]))
+
+        dialog = GitRepositoryStatusDialog("On branch main", branches, lambda *args: calls.append(args), self.window)
+        self.addCleanup(dialog.close)
+        buttons = dialog.findChild(QDialogButtonBox).buttons()
+        for label, action in (("Fetch", "fetch"), ("Push", "push"), ("Pull", "pull")):
+            next(button for button in buttons if button.text() == label).click()
+            self.assertEqual(calls[-1], (action, []))
+
+    def test_publish_button_appears_only_for_untracked_local_branch(self):
+        from src.dialogs import GitRepositoryStatusDialog
+        from src.git_operations import GitBranchInfo
+
+        for upstream, expected_visible in ((None, True), ("origin/main", False)):
+            with self.subTest(upstream=upstream):
+                calls = []
+                branches = GitBranchInfo("git2", ["git2"], [], upstream, ["backup", "origin"])
+                dialog = GitRepositoryStatusDialog(
+                    "On branch git2", branches, lambda *args: calls.append(args), self.window
+                )
+                self.addCleanup(dialog.close)
+                self.assertEqual(not dialog.publish_group.isHidden(), expected_visible)
+                if expected_visible:
+                    self.assertEqual(dialog.publish_remote_combo.currentText(), "origin")
+                    dialog.publish_remote_combo.setCurrentText("backup")
+                    dialog.publish_button.click()
+                    self.assertEqual(calls, [("publish", ["backup", "git2"])])
+
+    def test_repository_status_dialog_handles_detached_and_missing_remote_branches(self):
+        from PySide6.QtWidgets import QComboBox, QPushButton
+        from src.dialogs import GitRepositoryStatusDialog
+        from src.git_operations import GitBranchInfo
+
+        dialog = GitRepositoryStatusDialog(
+            "HEAD detached", GitBranchInfo(None, ["main"], []), lambda *_: None, self.window
+        )
+        self.addCleanup(dialog.close)
+        self.assertTrue(dialog.local_branch_combo.currentText())
+        self.assertTrue(next(button for button in dialog.findChildren(QPushButton) if button.text() == "Switch").isEnabled())
+        self.assertFalse(next(
+            button for button in dialog.findChildren(QPushButton)
+            if button.text() == "Create Tracking Branch"
+        ).isEnabled())
+
     def test_clone_menu_starts_dialog_and_background_operation(self):
         from PySide6.QtWidgets import QDialog, QMenu
         from src.dialogs import GitCloneDialog
@@ -302,7 +492,8 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         menu = QMenu(self.window)
         with patch.object(self.window, "current_path", return_value=self.temporary.name):
             self.window._add_git_menu(menu)
-        clone_action = menu.actions()[0].menu().actions()[0]
+        more_menu = menu.actions()[0].menu().actions()[5].menu()
+        clone_action = more_menu.actions()[0]
         destination = str(Path(self.temporary.name) / "repo")
         with patch.object(GitCloneDialog, "exec", return_value=QDialog.DialogCode.Accepted), patch.object(
             GitCloneDialog, "values", return_value=("https://example.com/repo.git", destination)
@@ -311,6 +502,9 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         start.assert_called_once_with(
             "clone", self.temporary.name, ["https://example.com/repo.git", destination]
         )
+        with patch.object(self.window, "_start_git_operation") as start:
+            more_menu.actions()[1].trigger()
+        start.assert_called_once_with("init", self.temporary.name, [])
 
     def test_successful_clone_opens_destination(self):
         from src.file_explorer import _GitWorker
@@ -331,36 +525,80 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         from src.dialogs import GitStagingDialog
         from src.git_operations import GitChange, GitChanges
 
-        changes = GitChanges(self.temporary.name, [GitChange("modified.txt")], [GitChange("new.txt")], [])
+        changes = GitChanges(
+            self.temporary.name, [GitChange("modified.txt")], [GitChange("new.txt")], [], "feature/device"
+        )
         dialog = GitStagingDialog(changes, "stage", self.window)
         self.addCleanup(dialog.close)
+        self.assertEqual(dialog.windowTitle(), "Staging - feature/device")
         self.assertEqual(len(dialog.file_lists), 2)
         self.assertEqual(dialog.file_lists[0].item(0).text(), "modified.txt")
         self.assertEqual(dialog.file_lists[1].item(0).text(), "new.txt")
+        self.assertEqual(len(dialog.check_all_buttons), 2)
+        self.assertEqual(len(dialog.uncheck_all_buttons), 2)
+        self.assertTrue(all(button.isEnabled() for button in dialog.check_all_buttons))
+        self.assertTrue(all(not button.isEnabled() for button in dialog.uncheck_all_buttons))
         self.assertEqual(dialog.selected_paths(), [])
         self.assertFalse(dialog.action_button.isEnabled())
+        dialog.check_all_buttons[0].click()
+        self.assertEqual(dialog.selected_paths(), [str(Path(changes.root) / "modified.txt")])
+        self.assertFalse(dialog.check_all_buttons[0].isEnabled())
+        self.assertTrue(dialog.uncheck_all_buttons[0].isEnabled())
+        self.assertTrue(dialog.check_all_buttons[1].isEnabled())
         dialog.file_lists[1].item(0).setCheckState(Qt.CheckState.Checked)
-        self.assertEqual(dialog.selected_paths(), [str(Path(changes.root) / "new.txt")])
+        self.assertEqual(
+            set(dialog.selected_paths()),
+            {str(Path(changes.root) / "modified.txt"), str(Path(changes.root) / "new.txt")},
+        )
+        self.assertFalse(dialog.check_all_buttons[1].isEnabled())
+        self.assertTrue(dialog.uncheck_all_buttons[1].isEnabled())
         self.assertTrue(dialog.action_button.isEnabled())
-        dialog.file_lists[1].item(0).setCheckState(Qt.CheckState.Unchecked)
+        dialog.uncheck_all_buttons[1].click()
+        self.assertTrue(dialog.check_all_buttons[1].isEnabled())
+        self.assertFalse(dialog.uncheck_all_buttons[1].isEnabled())
+        self.assertEqual(dialog.selected_paths(), [str(Path(changes.root) / "modified.txt")])
+        self.assertTrue(dialog.action_button.isEnabled())
+        dialog.uncheck_all_buttons[0].click()
         self.assertFalse(dialog.action_button.isEnabled())
 
-    def test_unstaging_dialog_unstages_only_unchecked_files(self):
+    def test_unstaging_dialog_unstages_only_checked_files(self):
         from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QLabel
         from src.dialogs import GitStagingDialog
         from src.git_operations import GitChange, GitChanges
 
-        changes = GitChanges(self.temporary.name, [], [], [GitChange("keep.txt"), GitChange("unstage.txt")])
+        changes = GitChanges(
+            self.temporary.name, [], [], [GitChange("keep.txt"), GitChange("unstage.txt")], "git2"
+        )
         dialog = GitStagingDialog(changes, "unstage", self.window)
         self.addCleanup(dialog.close)
+        self.assertEqual(dialog.windowTitle(), "Unstaging - git2")
         self.assertEqual(len(dialog.file_lists), 1)
+        self.assertIn(
+            "Staged Files (2), please check files you want to unstage",
+            [label.text() for label in dialog.findChildren(QLabel)],
+        )
+        self.assertEqual(len(dialog.check_all_buttons), 1)
+        self.assertEqual(len(dialog.uncheck_all_buttons), 1)
         self.assertTrue(all(
-            dialog.file_lists[0].item(row).checkState() == Qt.CheckState.Checked for row in range(2)
+            dialog.file_lists[0].item(row).checkState() == Qt.CheckState.Unchecked for row in range(2)
         ))
+        self.assertTrue(dialog.check_all_buttons[0].isEnabled())
+        self.assertFalse(dialog.uncheck_all_buttons[0].isEnabled())
         self.assertFalse(dialog.action_button.isEnabled())
-        dialog.file_lists[0].item(1).setCheckState(Qt.CheckState.Unchecked)
+        dialog.file_lists[0].item(1).setCheckState(Qt.CheckState.Checked)
         self.assertEqual(dialog.selected_paths(), [str(Path(changes.root) / "unstage.txt")])
         self.assertTrue(dialog.action_button.isEnabled())
+        dialog.check_all_buttons[0].click()
+        self.assertEqual(
+            set(dialog.selected_paths()),
+            {str(Path(changes.root) / "keep.txt"), str(Path(changes.root) / "unstage.txt")},
+        )
+        self.assertFalse(dialog.check_all_buttons[0].isEnabled())
+        self.assertTrue(dialog.uncheck_all_buttons[0].isEnabled())
+        dialog.uncheck_all_buttons[0].click()
+        self.assertEqual(dialog.selected_paths(), [])
+        self.assertFalse(dialog.action_button.isEnabled())
 
     def test_empty_dialogs_do_not_allow_operations(self):
         from src.dialogs import GitStagingDialog
@@ -371,6 +609,9 @@ class GitExplorerIntegrationTests(unittest.TestCase):
                 dialog = GitStagingDialog(GitChanges(self.temporary.name, [], [], []), action, self.window)
                 self.assertEqual(dialog.selected_paths(), [])
                 self.assertFalse(dialog.action_button.isEnabled())
+                self.assertEqual(len(dialog.check_all_buttons), 2 if action == "stage" else 1)
+                self.assertTrue(all(not button.isEnabled() for button in dialog.check_all_buttons))
+                self.assertTrue(all(not button.isEnabled() for button in dialog.uncheck_all_buttons))
                 dialog.close()
 
     def test_dialog_passes_both_rename_paths(self):
@@ -381,7 +622,7 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         changes = GitChanges(self.temporary.name, [], [], [GitChange("new.txt", "old.txt")])
         dialog = GitStagingDialog(changes, "unstage", self.window)
         self.addCleanup(dialog.close)
-        dialog.file_lists[0].item(0).setCheckState(Qt.CheckState.Unchecked)
+        dialog.file_lists[0].item(0).setCheckState(Qt.CheckState.Checked)
         self.assertEqual(dialog.selected_paths(), [
             str(Path(changes.root) / "new.txt"), str(Path(changes.root) / "old.txt")
         ])
@@ -402,7 +643,7 @@ class GitExplorerIntegrationTests(unittest.TestCase):
 
                 def accept_selection(dialog):
                     dialog.file_lists[0].item(0).setCheckState(
-                        Qt.CheckState.Checked if operation == "stage" else Qt.CheckState.Unchecked
+                        Qt.CheckState.Checked
                     )
                     return QDialog.Accepted
 
@@ -473,7 +714,7 @@ class GitExplorerIntegrationTests(unittest.TestCase):
                                 item = file_list.item(row)
                                 if item.text() == chosen.name:
                                     item.setCheckState(
-                                        Qt.CheckState.Checked if action == "staging" else Qt.CheckState.Unchecked
+                                        Qt.CheckState.Checked
                                     )
                         dialog.action_button.click()
 
@@ -521,7 +762,10 @@ class GitExplorerIntegrationTests(unittest.TestCase):
                     if child.windowTitle() == "Repository Status" and child.isVisible()
                 )
                 buttons = dialog.findChild(QDialogButtonBox).buttons()
-                self.assertEqual({button.text().replace("&", "") for button in buttons}, {"Push", "Pull", "Close"})
+                self.assertEqual(
+                    {button.text().replace("&", "") for button in buttons},
+                    {"Fetch", "Push", "Pull", "Close"},
+                )
                 with patch.object(self.window, "current_path", return_value="/elsewhere"), patch.object(
                     self.window, "_start_git_operation"
                 ) as start:

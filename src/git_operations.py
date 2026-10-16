@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -25,6 +25,22 @@ class GitChanges:
     modified: list[GitChange]
     untracked: list[GitChange]
     staged: list[GitChange]
+    branch: str | None = None
+
+
+@dataclass(frozen=True)
+class GitBranchInfo:
+    current: str | None
+    local: list[str]
+    remote: list[tuple[str, str]]
+    upstream: str | None = None
+    remotes: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class GitRepositoryStatus:
+    text: str
+    branches: GitBranchInfo
 
 
 class GitOperations:
@@ -51,7 +67,9 @@ class GitOperations:
             with Repo(self.directory, search_parent_directories=True) as repository:
                 if repository.bare or repository.working_tree_dir is None:
                     raise GitOperationError("A working-tree repository is required.")
-                selected = self._relative_paths(repository.working_tree_dir, paths or [])
+                selected = self._relative_paths(repository.working_tree_dir, paths or []) if action in {
+                    "stage", "unstage", "diff"
+                } else []
                 with repository.git.custom_environment(
                     GIT_LITERAL_PATHSPECS="1", GIT_TERMINAL_PROMPT="0"
                 ):
@@ -59,13 +77,60 @@ class GitOperations:
                         return self._changes(repository)
                     if action == "status":
                         return repository.git.status(untracked_files="all", **self._timeout_options(30))
-                    if action in {"push", "pull"}:
-                        command = repository.git.push if action == "push" else repository.git.pull
-                        options = ["--verbose"] if action == "push" else ["--ff-only"]
+                    if action in {"push", "pull", "fetch"}:
+                        command = {
+                            "push": repository.git.push,
+                            "pull": repository.git.pull,
+                            "fetch": repository.git.fetch,
+                        }[action]
+                        options = {
+                            "push": ["--verbose"],
+                            "pull": ["--ff-only"],
+                            "fetch": ["--all", "--prune"],
+                        }[action]
                         _, stdout, stderr = command(
                             *options, with_extended_output=True, **self._timeout_options(120)
                         )
                         return "\n".join(part for part in (stdout, stderr) if part) or f"Git {action} completed."
+                    if action == "publish":
+                        if not paths or len(paths) != 2:
+                            raise GitOperationError("Select a remote to publish the current branch to.")
+                        remote, branch = paths
+                        if remote not in {item.name for item in repository.remotes}:
+                            raise GitOperationError(f"Git remote '{remote}' does not exist.")
+                        if branch not in {head.name for head in repository.heads}:
+                            raise GitOperationError(f"Local branch '{branch}' does not exist.")
+                        repository.git.push(
+                            "--set-upstream", remote, branch, **self._timeout_options(120)
+                        )
+                        return f"Published branch '{branch}' to '{remote}' and set its upstream."
+                    if action == "switch":
+                        branch = self._required_argument(paths, "Select a local branch first.")
+                        if branch not in {head.name for head in repository.heads}:
+                            raise GitOperationError(f"Local branch '{branch}' does not exist.")
+                        repository.git.switch(branch, **self._timeout_options(30))
+                        return f"Switched to branch '{branch}'."
+                    if action == "track":
+                        if not paths or len(paths) != 2:
+                            raise GitOperationError("Select a remote branch first.")
+                        remote_ref, local_branch = paths
+                        if remote_ref not in {ref.name for remote in repository.remotes for ref in remote.refs}:
+                            raise GitOperationError(f"Remote branch '{remote_ref}' does not exist.")
+                        if not local_branch.strip():
+                            raise GitOperationError("A local branch name is required.")
+                        repository.git.check_ref_format("--branch", local_branch)
+                        repository.git.switch(
+                            "--track", "-c", local_branch, remote_ref,
+                            **self._timeout_options(30),
+                        )
+                        return f"Created tracking branch '{local_branch}' from '{remote_ref}'."
+                    if action == "create_branch":
+                        branch = self._required_argument(paths, "Enter a local branch name.")
+                        repository.git.check_ref_format("--branch", branch)
+                        repository.git.switch(
+                            "--no-track", "-c", branch, **self._timeout_options(30)
+                        )
+                        return f"Created local branch '{branch}' without an upstream."
                     if action == "diff":
                         return repository.git.diff(
                             "--cached", "--no-ext-diff", "--no-textconv", **self._timeout_options(30)
@@ -118,6 +183,37 @@ class GitOperations:
         ) as repository:
             return f"Cloned {url} to {repository.working_tree_dir}."
 
+    def branch_info(self) -> GitBranchInfo:
+        try:
+            with Repo(self.directory, search_parent_directories=True) as repository:
+                if repository.bare or repository.working_tree_dir is None:
+                    raise GitOperationError("A working-tree repository is required.")
+                current = None if repository.head.is_detached else repository.active_branch.name
+                local = sorted(head.name for head in repository.heads)
+                active = None if current is None else repository.active_branch
+                tracking = None if active is None else active.tracking_branch()
+                remote = sorted(
+                    (reference.name, reference.remote_head)
+                    for remote_repository in repository.remotes
+                    for reference in remote_repository.refs
+                    if reference.remote_head != "HEAD"
+                )
+                return GitBranchInfo(
+                    current,
+                    local,
+                    remote,
+                    tracking.name if tracking is not None else None,
+                    sorted(item.name for item in repository.remotes),
+                )
+        except (InvalidGitRepositoryError, NoSuchPathError) as error:
+            raise GitOperationError("This folder is not inside a Git repository.") from error
+
+    @staticmethod
+    def _required_argument(paths: list[str] | None, error_message: str) -> str:
+        if not paths or not paths[0].strip():
+            raise GitOperationError(error_message)
+        return paths[0]
+
     @staticmethod
     def _timeout_options(seconds: int) -> dict[str, int]:
         return {} if sys.platform == "win32" else {"kill_after_timeout": seconds}
@@ -143,7 +239,8 @@ class GitOperations:
                 staged.append(GitChange(path, original_path if index_status in {"R", "C"} else None))
             if worktree_status not in {" ", "?", "!"} or index_status == "U":
                 modified.append(GitChange(path, original_path if worktree_status in {"R", "C"} else None))
-        return GitChanges(repository.working_tree_dir, modified, untracked, staged)
+        branch = None if repository.head.is_detached else repository.active_branch.name
+        return GitChanges(repository.working_tree_dir, modified, untracked, staged, branch)
 
     @staticmethod
     def _relative_paths(root: str, paths: list[str]) -> list[str]:
