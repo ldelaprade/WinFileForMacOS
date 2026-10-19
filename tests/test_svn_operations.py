@@ -45,6 +45,59 @@ class SvnOperationsTests(unittest.TestCase):
         other_operations.run("update")
         self.assertEqual((self.other / chosen.name).read_text(), "changed\n")
 
+    def test_delete_schedules_versioned_removal_and_removes_selected_unversioned_file(self):
+        tracked = self.working / "tracked.txt"
+        untracked = self.working / "untracked.txt"
+        tracked.write_text("tracked content\n")
+        self.operations.run("add", [str(tracked)])
+        self.operations.run("commit", [str(tracked)], "Add tracked file")
+        untracked.write_text("untracked content\n")
+
+        output = self.operations.run("delete", [str(tracked), str(untracked)])
+
+        self.assertFalse(tracked.exists())
+        self.assertFalse(untracked.exists())
+        self.assertIn("D", output)
+        self.assertIn("tracked.txt", self.operations.run("status"))
+        self.operations.run("commit", [str(tracked)], "Delete tracked file")
+        SvnOperations(str(self.other)).run("update")
+        self.assertFalse((self.other / tracked.name).exists())
+
+    def test_changes_filters_candidates_for_add_delete_and_commit(self):
+        tracked = self.working / "tracked.txt"
+        scheduled_delete = self.working / "scheduled-delete.txt"
+        tracked.write_text("initial\n")
+        scheduled_delete.write_text("to be deleted\n")
+        self.operations.run("add", [str(tracked), str(scheduled_delete)])
+        self.operations.run("commit", [str(tracked), str(scheduled_delete)], "Initial files")
+        tracked.write_text("modified\n")
+        scheduled_delete.unlink()
+        self.operations.run("delete", [str(scheduled_delete)])
+        unversioned_file = self.working / "new.txt"
+        unversioned_file.write_text("new\n")
+        unversioned_folder = self.working / "new folder"
+        unversioned_folder.mkdir()
+
+        changes = self.operations.changes()
+        statuses = {Path(item.path).name: item.status for item in changes.items}
+
+        self.assertEqual(statuses[tracked.name], "modified")
+        self.assertEqual(statuses[scheduled_delete.name], "deleted")
+        self.assertEqual(statuses[unversioned_file.name], "unversioned")
+        self.assertEqual(statuses[unversioned_folder.name], "unversioned")
+        self.assertEqual(
+            {Path(item.path).name for item in changes.for_action("add")},
+            {unversioned_file.name, unversioned_folder.name},
+        )
+        self.assertEqual(
+            {Path(item.path).name for item in changes.for_action("delete")},
+            {tracked.name},
+        )
+        self.assertEqual(
+            {Path(item.path).name for item in changes.for_action("commit")},
+            {tracked.name},
+        )
+
     def test_checkout_repository_url_into_explicit_local_folder(self):
         repository = self.root / "repository"
         source = self.root / "source"
@@ -186,18 +239,89 @@ class SvnExplorerIntegrationTests(unittest.TestCase):
                 menu = QMenu(self.window)
                 self.window._add_svn_menu(menu)
                 actions = menu.actions()[0].menu().actions()
-                self.assertEqual(len(actions), 6)
-                self.assertEqual(actions[3].isEnabled(), bool(paths))
-                self.assertEqual(actions[4].isEnabled(), bool(paths))
+                self.assertEqual(len(actions), 7)
+                self.assertEqual(
+                    [actions[index].text() for index in (3, 4, 5)],
+                    ["Add from Status...", "Delete from Status...", "Commit from Status..."],
+                )
+                self.assertTrue(all(actions[index].isEnabled() for index in (3, 4, 5)))
                 with patch.object(self.window, "_start_svn_operation") as start:
                     actions[2].trigger()
-                    start.assert_called_once_with("diff", self.temporary.name, paths)
+                    start.assert_called_once_with("diff", self.temporary.name, [])
                     start.reset_mock()
-                    actions[5].trigger()
+                    actions[6].trigger()
                     start.assert_called_once_with("update", self.temporary.name, [])
+                with patch.object(self.window, "_start_svn_selection_operation") as select:
+                    for index, action in ((3, "add"), (4, "delete"), (5, "commit")):
+                        actions[index].trigger()
+                        select.assert_called_with(action, self.temporary.name)
                 with patch.object(self.window, "_start_svn_checkout") as checkout:
                     actions[0].trigger()
                     checkout.assert_called_once_with(self.temporary.name)
+
+    def test_selection_dialog_filters_actions_and_selects_only_checked_items(self):
+        from PySide6.QtCore import Qt
+        from src.dialogs import SvnSelectionDialog
+        from src.svn_operations import SvnChange, SvnChanges
+
+        changes = SvnChanges(self.temporary.name, [
+            SvnChange(str(Path(self.temporary.name) / "modified.txt"), "modified"),
+            SvnChange(str(Path(self.temporary.name) / "new.txt"), "unversioned"),
+            SvnChange(str(Path(self.temporary.name) / "deleted.txt"), "deleted"),
+        ])
+        add_dialog = SvnSelectionDialog(changes, "add", self.window)
+        self.addCleanup(add_dialog.close)
+        self.assertEqual(add_dialog.file_list.count(), 1)
+        self.assertIn("unversioned", add_dialog.file_list.item(0).text().lower())
+        self.assertFalse(add_dialog.action_button.isEnabled())
+        add_dialog.file_list.item(0).setCheckState(Qt.CheckState.Checked)
+        self.assertEqual(add_dialog.selected_paths(), [str(Path(self.temporary.name) / "new.txt")])
+        self.assertTrue(add_dialog.action_button.isEnabled())
+        add_dialog.uncheck_all_button.click()
+        self.assertEqual(add_dialog.selected_paths(), [])
+
+        delete_dialog = SvnSelectionDialog(changes, "delete", self.window)
+        self.addCleanup(delete_dialog.close)
+        self.assertEqual(delete_dialog.file_list.count(), 1)
+        delete_dialog.check_all_button.click()
+        self.assertEqual(set(delete_dialog.selected_paths()), {
+            str(Path(self.temporary.name) / "modified.txt"),
+        })
+
+        commit_dialog = SvnSelectionDialog(changes, "commit", self.window)
+        self.addCleanup(commit_dialog.close)
+        self.assertEqual(commit_dialog.file_list.count(), 1)
+        self.assertIn("modified.txt", commit_dialog.file_list.item(0).text())
+        self.assertEqual(commit_dialog.selected_paths(), [])
+
+    def test_background_status_checklist_passes_chosen_paths_to_operation(self):
+        from PySide6.QtCore import QEventLoop, QTimer
+        from PySide6.QtWidgets import QDialog
+        from src.dialogs import SvnSelectionDialog
+        from src.svn_operations import SvnChange, SvnChanges
+
+        chosen_path = str(Path(self.temporary.name) / "new file.txt")
+        changes = SvnChanges(self.temporary.name, [SvnChange(chosen_path, "unversioned")])
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+
+        with patch("src.svn_operations.SvnOperations.changes", return_value=changes) as scan, patch.object(
+            SvnSelectionDialog, "exec", return_value=QDialog.DialogCode.Accepted
+        ), patch.object(
+            SvnSelectionDialog, "selected_paths", return_value=[chosen_path]
+        ), patch.object(self.window, "_start_svn_operation", side_effect=lambda *_: loop.quit()) as start:
+            self.window._start_svn_selection_operation("add", self.temporary.name)
+            timer.start(5000)
+            loop.exec()
+            timer.stop()
+            self.window._svn_thread_pool.waitForDone()
+            self.application.processEvents()
+
+        scan.assert_called_once_with()
+        start.assert_called_once_with("add", self.temporary.name, [chosen_path])
+        self.assertIsNone(self.window._svn_worker)
 
     def test_checkout_dialog_suggests_repository_name_and_returns_destination(self):
         from PySide6.QtTest import QTest
@@ -246,6 +370,27 @@ class SvnExplorerIntegrationTests(unittest.TestCase):
                 self.window._start_svn_operation("commit", self.temporary.name, ["chosen.txt"])
                 start.assert_not_called()
                 self.assertIsNone(self.window._svn_worker)
+
+    def test_delete_requires_confirmation_and_starts_with_selected_paths(self):
+        from PySide6.QtWidgets import QDialog
+
+        paths = [str(Path(self.temporary.name) / "tracked.txt")]
+        with patch("src.dialogs.DeleteConfirmDialog.exec", return_value=QDialog.DialogCode.Rejected), patch.object(
+            self.window._svn_thread_pool, "start"
+        ) as start:
+            self.window._start_svn_operation("delete", self.temporary.name, paths)
+        start.assert_not_called()
+        self.assertIsNone(self.window._svn_worker)
+
+        with patch("src.dialogs.DeleteConfirmDialog.exec", return_value=QDialog.DialogCode.Accepted), patch.object(
+            self.window._svn_thread_pool, "start"
+        ) as start:
+            self.window._start_svn_operation("delete", self.temporary.name, paths)
+        worker = start.call_args.args[0]
+        self.assertEqual(worker.action, "delete")
+        self.assertEqual(worker.paths, paths)
+        self.assertIs(self.window._svn_worker, worker)
+        self.window._svn_worker = None
 
     def test_status_update_button_keeps_original_working_copy(self):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox, QPlainTextEdit

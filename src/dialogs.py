@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 if TYPE_CHECKING:
     from .git_operations import GitBranchInfo, GitChanges
+    from .svn_operations import SvnChanges
 
 
 class GitStagingDialog(QDialog):
@@ -259,6 +260,82 @@ class GitRepositoryStatusDialog(QDialog):
     def _run_operation(self, action: str, paths: list[str]) -> None:
         self.accept()
         self.operation_callback(action, paths)
+
+
+class SvnSelectionDialog(QDialog):
+    def __init__(self, changes: SvnChanges, action: str, parent: QMainWindow | None = None) -> None:
+        super().__init__(parent)
+        titles = {
+            "add": ("Add Selected", "Unversioned Items"),
+            "delete": ("Delete Selected", "Versioned Items"),
+            "commit": ("Commit Selected", "Versioned Changes"),
+        }
+        if action not in titles:
+            raise ValueError(f"Unsupported SVN selection action: {action}")
+        self.action = action
+        action_title, list_title = titles[action]
+        self.setWindowTitle(f"SVN {action_title}")
+        self.resize(720, 480)
+        layout = QVBoxLayout(self)
+        working_copy_label = QLabel(changes.directory, self)
+        working_copy_label.setWordWrap(True)
+        layout.addWidget(working_copy_label)
+        self.file_list = QListWidget(self)
+        self.file_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        for change in changes.for_action(action):
+            try:
+                display_path = Path(change.path).relative_to(changes.directory).as_posix()
+            except ValueError:
+                display_path = change.path
+            item = QListWidgetItem(f"{change.status.title()} - {display_path}", self.file_list)
+            item.setData(Qt.ItemDataRole.UserRole, change.path)
+            item.setToolTip(change.path)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+        selection_header = QHBoxLayout()
+        selection_header.addWidget(QLabel(f"{list_title} ({self.file_list.count()})", self))
+        selection_header.addStretch()
+        self.check_all_button = QPushButton("Check All", self)
+        self.check_all_button.clicked.connect(self._check_all)
+        self.uncheck_all_button = QPushButton("Uncheck All", self)
+        self.uncheck_all_button.clicked.connect(self._uncheck_all)
+        selection_header.addWidget(self.check_all_button)
+        selection_header.addWidget(self.uncheck_all_button)
+        layout.addLayout(selection_header)
+        layout.addWidget(self.file_list)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        self.action_button = buttons.addButton(action_title, QDialogButtonBox.ButtonRole.AcceptRole)
+        self.action_button.setAutoDefault(False)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.file_list.itemChanged.connect(self._update_buttons)
+        self._update_buttons()
+
+    def selected_paths(self) -> list[str]:
+        return [
+            self.file_list.item(row).data(Qt.ItemDataRole.UserRole)
+            for row in range(self.file_list.count())
+            if self.file_list.item(row).checkState() == Qt.CheckState.Checked
+        ]
+
+    def _update_buttons(self) -> None:
+        states = [
+            self.file_list.item(row).checkState()
+            for row in range(self.file_list.count())
+        ]
+        self.action_button.setEnabled(any(state == Qt.CheckState.Checked for state in states))
+        self.check_all_button.setEnabled(any(state != Qt.CheckState.Checked for state in states))
+        self.uncheck_all_button.setEnabled(any(state == Qt.CheckState.Checked for state in states))
+
+    def _check_all(self) -> None:
+        for row in range(self.file_list.count()):
+            self.file_list.item(row).setCheckState(Qt.CheckState.Checked)
+
+    def _uncheck_all(self) -> None:
+        for row in range(self.file_list.count()):
+            self.file_list.item(row).setCheckState(Qt.CheckState.Unchecked)
 
 
 class SvnCheckoutDialog(QDialog):

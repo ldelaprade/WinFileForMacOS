@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
@@ -11,6 +12,33 @@ class SvnOperationError(Exception):
     def __init__(self, message: str, authentication_required: bool = False) -> None:
         super().__init__(message)
         self.authentication_required = authentication_required
+
+
+@dataclass(frozen=True)
+class SvnChange:
+    path: str
+    status: str
+
+
+@dataclass(frozen=True)
+class SvnChanges:
+    directory: str
+    items: list[SvnChange]
+
+    def for_action(self, action: str) -> list[SvnChange]:
+        if action == "add":
+            return [item for item in self.items if item.status == "unversioned"]
+        if action == "delete":
+            return [
+                item for item in self.items
+                if item.status not in {"unversioned", "deleted", "external", "ignored"}
+            ]
+        if action == "commit":
+            return [
+                item for item in self.items
+                if item.status not in {"unversioned", "deleted", "missing", "obstructed", "incomplete", "external", "ignored"}
+            ]
+        raise SvnOperationError(f"Unsupported SVN selection action: {action}")
 
 
 class SvnOperations:
@@ -37,14 +65,53 @@ class SvnOperations:
         output = self._execute("checkout", "--", url.strip(), str(target))
         return output or f"Checked out {url.strip()} to {target}."
 
+    def changes(self) -> SvnChanges:
+        info = self._execute("info", "--xml", "--", str(self.directory) + "@")
+        try:
+            root_text = ElementTree.fromstring(info).findtext("entry/wc-info/wcroot-abspath")
+        except ElementTree.ParseError as error:
+            raise SvnOperationError("Could not read SVN working-copy information.") from error
+        if not root_text:
+            raise SvnOperationError("This folder is not inside an SVN working copy.")
+        status_output = self._execute(
+            "status", "--xml", "--depth", "infinity", "--", str(self.directory) + "@"
+        )
+        try:
+            xml_root = ElementTree.fromstring(status_output)
+        except ElementTree.ParseError as error:
+            raise SvnOperationError("Could not read SVN status information.") from error
+        items: list[SvnChange] = []
+        for entry in xml_root.findall(".//entry"):
+            working_status = entry.find("wc-status")
+            if working_status is None:
+                continue
+            status = working_status.get("item", "normal")
+            if status == "normal" and working_status.get("props", "none") != "none":
+                status = "property modified"
+            if status in {"normal", "ignored", "external"} and status != "normal":
+                continue
+            target = Path(entry.get("path", ""))
+            if not target.is_absolute():
+                target = self.directory / target
+            target = Path(os.path.abspath(target))
+            try:
+                relative = target.relative_to(self.directory)
+            except ValueError:
+                continue
+            if any(part.lower() == ".svn" for part in relative.parts):
+                continue
+            items.append(SvnChange(str(target), status))
+        items.sort(key=lambda item: item.path.casefold())
+        return SvnChanges(str(self.directory), items)
+
     def run(self, action: str, paths: list[str] | None = None, message: str = "") -> str:
-        if action not in {"status", "diff", "add", "commit", "update", "checkout"}:
+        if action not in {"status", "diff", "add", "delete", "commit", "update", "checkout"}:
             raise SvnOperationError(f"Unsupported SVN action: {action}")
         if action == "checkout":
             if not paths or len(paths) != 2:
                 raise SvnOperationError("Provide a repository URL and checkout destination.")
             return self.checkout(paths[0], paths[1])
-        if action in {"add", "commit"} and not paths:
+        if action in {"add", "delete", "commit"} and not paths:
             raise SvnOperationError("Select files or folders first.")
         if action == "commit" and not message.strip():
             raise SvnOperationError("A commit message is required.")
@@ -67,7 +134,7 @@ class SvnOperations:
             if any(part.lower() == ".svn" for part in relative.parts):
                 raise SvnOperationError("SVN metadata cannot be selected.")
             targets.append(str(target) + "@")
-        options = ["--parents"] if action == "add" else []
+        options = {"add": ["--parents"], "delete": ["--force"]}.get(action, [])
         if action == "diff":
             options = ["--revision", "BASE", "--internal-diff"]
         if action == "commit":

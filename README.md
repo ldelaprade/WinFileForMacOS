@@ -110,11 +110,13 @@ and its descendants. The status dialog also offers **Update** and **Close**.
 **Diff** shows local changes for the selected items, or the current folder if
 nothing is selected.
 
-Select files or folders in the explorer before using **Add Selected** or
-**Commit Selected**. Add schedules unversioned items for the next commit; Commit
-asks for a message and sends the selected changes directly to the SVN server.
-Selecting a folder includes its descendants. Unselected files are not committed
-unless they are inside a selected folder. SVN has no Git-style staging or Push.
+Use **Add from Status...**, **Delete from Status...**, or **Commit from Status...**
+to open a checklist of working-copy items; explorer selection is not required.
+Add lists unversioned files and folders for scheduling. Delete lists only
+versioned items, asks for confirmation, removes checked items from the working
+copy, and schedules their deletion on the next commit. Commit asks for a message and
+sends only checked versioned changes directly to the SVN server. Selecting a
+folder includes its descendants. SVN has no Git-style staging or Push.
 
 Commands run in a background worker with a 120-second timeout per command and
 use existing SVN configuration and cached credentials. If cached authentication

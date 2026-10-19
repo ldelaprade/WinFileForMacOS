@@ -89,9 +89,11 @@ from .dialogs import (
     GitCloneDialog,
     GitStagingDialog,
     SvnCheckoutDialog,
+    SvnSelectionDialog,
     WindowsShareDialog,
     build_delete_confirmation_message,
     build_move_confirmation_message,
+    selection_preview,
 )
 from .dragdrop_views import (
     ConfirmingDropTreeView,
@@ -207,7 +209,11 @@ class _SvnWorker(QRunnable):
         try:
             from .svn_operations import SvnOperations
 
-            output = SvnOperations(self.directory, self.credentials).run(self.action, self.paths, self.message)
+            operations = SvnOperations(self.directory, self.credentials)
+            if self.action.startswith("select_"):
+                output = operations.changes()
+            else:
+                output = operations.run(self.action, self.paths, self.message)
         except Exception as error:
             self.authentication_required = getattr(error, "authentication_required", False)
             self.signals.completed.emit(str(error), False)
@@ -999,6 +1005,7 @@ class ExplorerWindow(QMainWindow):
         menu.addSeparator()
         self._add_git_menu(menu)
         self._add_svn_menu(menu)
+        menu.addSeparator()
         self._add_show_hidden_action(menu)
         source = self.sender()
         if isinstance(source, (QTreeView, QListWidget)):
@@ -1132,26 +1139,37 @@ class ExplorerWindow(QMainWindow):
         menu.addMenu(svn_menu)
         svn_menu.setEnabled(not self._showing_this_pc and self._git_worker is None and self._svn_worker is None)
         directory = self.current_path()
-        paths = self.selected_paths()
         for label, action in (
             ("Checkout...", "checkout"),
             ("Working Copy Status...", "status"),
             ("Diff...", "diff"),
-            ("Add Selected", "add"),
-            ("Commit Selected...", "commit"),
+            ("Add from Status...", "add"),
+            ("Delete from Status...", "delete"),
+            ("Commit from Status...", "commit"),
             ("Update", "update"),
         ):
             command = svn_menu.addAction(
                 label,
                 lambda checked=False, operation=action: (
                     self._start_svn_checkout(directory) if operation == "checkout" else
-                    self._start_svn_operation(
-                        operation, directory, paths if operation in {"add", "commit", "diff"} else []
-                    )
+                    self._start_svn_selection_operation(operation, directory)
+                    if operation in {"add", "delete", "commit"} else
+                    self._start_svn_operation(operation, directory, [])
                 ),
             )
-            if action in {"add", "commit"}:
-                command.setEnabled(bool(paths))
+
+    def _start_svn_selection_operation(
+        self, action: str, directory: str, credentials: tuple[str, str] | None = None
+    ) -> None:
+        if self._git_worker is not None or self._svn_worker is not None:
+            return
+        if action not in {"add", "delete", "commit"}:
+            return
+        worker = _SvnWorker(directory, f"select_{action}", [], "", credentials)
+        worker.signals.completed.connect(self._svn_operation_finished)
+        self._svn_worker = worker
+        self.status.showMessage("Loading SVN working-copy changes...")
+        self._svn_thread_pool.start(worker)
 
     def _start_svn_checkout(self, parent_directory: str) -> None:
         if self._git_worker is not None or self._svn_worker is not None:
@@ -1168,11 +1186,20 @@ class ExplorerWindow(QMainWindow):
     ) -> None:
         if self._git_worker is not None or self._svn_worker is not None:
             return
-        if action in {"add", "commit"} and not paths:
+        if action in {"add", "delete", "commit"} and not paths:
             QMessageBox.warning(self, "SVN", "Select files or folders first.")
             return
         message = ""
-        if action == "commit":
+        if action == "delete":
+            message = (
+                f"Delete {len(paths)} selected item(s) from this working copy?\n\n"
+                f"{selection_preview(paths)}\n\n"
+                "Versioned items will be scheduled for deletion and removed from the repository on commit. "
+                "Any uncommitted changes inside the selected items will be removed."
+            )
+            if DeleteConfirmDialog(message, self).exec() != QDialog.DialogCode.Accepted:
+                return
+        elif action == "commit":
             message, accepted = QInputDialog.getMultiLineText(
                 self, "SVN Commit Selected", f"Commit message for {len(paths)} selected item(s):"
             )
@@ -1199,17 +1226,37 @@ class ExplorerWindow(QMainWindow):
                         self, "SVN Authentication", "Password:", QLineEdit.EchoMode.Password
                     )
                     if accepted:
-                        self._start_svn_operation(
-                            worker.action, worker.directory, worker.paths, (username.strip(), password)
-                        )
+                        credentials = (username.strip(), password)
+                        if worker.action.startswith("select_"):
+                            self._start_svn_selection_operation(
+                                worker.action.removeprefix("select_"), worker.directory, credentials
+                            )
+                        else:
+                            self._start_svn_operation(
+                                worker.action, worker.directory, worker.paths, credentials
+                            )
                         return
             QMessageBox.warning(self, "SVN Operation Failed", output)
+            return
+        if worker is not None and worker.action.startswith("select_"):
+            from .svn_operations import SvnChanges
+
+            if not isinstance(output, SvnChanges):
+                QMessageBox.warning(self, "SVN Operation Failed", "Could not load SVN working-copy changes.")
+                return
+            action = worker.action.removeprefix("select_")
+            dialog = SvnSelectionDialog(output, action, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                paths = dialog.selected_paths()
+                if paths:
+                    self._start_svn_operation(action, output.directory, paths)
+            dialog.deleteLater()
             return
         commands: dict[str, Callable[[], None]] = {}
         if worker is not None:
             if worker.action == "status":
                 commands["Update"] = lambda: self._start_svn_operation("update", worker.directory, [])
-            if worker.action in {"add", "commit", "update"}:
+            if worker.action in {"add", "delete", "commit", "update"}:
                 self.refresh()
             if worker.action == "checkout" and len(worker.paths) == 2:
                 self.navigate_to(worker.paths[1], record_history=True)
