@@ -266,20 +266,38 @@ class SvnSelectionDialog(QDialog):
     def __init__(self, changes: SvnChanges, action: str, parent: QMainWindow | None = None) -> None:
         super().__init__(parent)
         titles = {
-            "add": ("Add Selected", "Unversioned Items"),
-            "delete": ("Delete Selected", "Versioned Items"),
-            "commit": ("Commit Selected", "Versioned Changes"),
+            "add": (
+                "Add Selected",
+                "Unversioned Items",
+                "Select files and folders that are not yet tracked by SVN.",
+                "No unversioned items found.",
+            ),
+            "delete": (
+                "Schedule Deletion",
+                "Changed Versioned Items",
+                "Only changed or missing tracked items are listed. To delete a clean tracked file, remove it from disk first; it will then appear here as Missing. Selecting an item schedules its deletion in this working copy. Commit afterward to remove it from the repository.",
+                "No changed or missing tracked items. To delete a clean tracked file, remove it from disk first; it will then appear here.",
+            ),
+            "commit": (
+                "Commit Selected",
+                "Committable Versioned Changes",
+                "Select tracked changes, including scheduled deletions, to send to the repository. Unversioned items must be added first.",
+                "No committable versioned changes found.",
+            ),
         }
         if action not in titles:
             raise ValueError(f"Unsupported SVN selection action: {action}")
         self.action = action
-        action_title, list_title = titles[action]
+        action_title, list_title, description, empty_state = titles[action]
         self.setWindowTitle(f"SVN {action_title}")
         self.resize(720, 480)
         layout = QVBoxLayout(self)
         working_copy_label = QLabel(changes.directory, self)
         working_copy_label.setWordWrap(True)
         layout.addWidget(working_copy_label)
+        self.description_label = QLabel(description, self)
+        self.description_label.setWordWrap(True)
+        layout.addWidget(self.description_label)
         self.file_list = QListWidget(self)
         self.file_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         for change in changes.for_action(action):
@@ -292,6 +310,11 @@ class SvnSelectionDialog(QDialog):
             item.setToolTip(change.path)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
+        self.empty_state_label = QLabel(empty_state, self)
+        self.empty_state_label.setWordWrap(True)
+        self.empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_state_label.setVisible(self.file_list.count() == 0)
+        self.file_list.setVisible(self.file_list.count() > 0)
         selection_header = QHBoxLayout()
         selection_header.addWidget(QLabel(f"{list_title} ({self.file_list.count()})", self))
         selection_header.addStretch()
@@ -302,6 +325,7 @@ class SvnSelectionDialog(QDialog):
         selection_header.addWidget(self.check_all_button)
         selection_header.addWidget(self.uncheck_all_button)
         layout.addLayout(selection_header)
+        layout.addWidget(self.empty_state_label)
         layout.addWidget(self.file_list)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)

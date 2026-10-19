@@ -36,7 +36,7 @@ class SvnChanges:
         if action == "commit":
             return [
                 item for item in self.items
-                if item.status not in {"unversioned", "deleted", "missing", "obstructed", "incomplete", "external", "ignored"}
+                if item.status not in {"unversioned", "missing", "obstructed", "incomplete", "external", "ignored"}
             ]
         raise SvnOperationError(f"Unsupported SVN selection action: {action}")
 
@@ -45,6 +45,7 @@ class SvnOperations:
     def __init__(self, directory: str, credentials: tuple[str, str] | None = None) -> None:
         self.directory = Path(os.path.abspath(directory))
         self.credentials = credentials
+        self.working_copy_root: str | None = None
 
     def checkout(self, url: str, destination: str) -> str:
         try:
@@ -73,6 +74,7 @@ class SvnOperations:
             raise SvnOperationError("Could not read SVN working-copy information.") from error
         if not root_text:
             raise SvnOperationError("This folder is not inside an SVN working copy.")
+        self.working_copy_root = str(Path(root_text).resolve())
         status_output = self._execute(
             "status", "--xml", "--depth", "infinity", "--", str(self.directory) + "@"
         )
@@ -122,6 +124,7 @@ class SvnOperations:
             raise SvnOperationError("Could not read SVN working-copy information.") from error
         if not root_text:
             raise SvnOperationError("This folder is not inside an SVN working copy.")
+        self.working_copy_root = str(Path(root_text).resolve())
         root = Path(root_text)
         targets = []
         for path in paths or []:

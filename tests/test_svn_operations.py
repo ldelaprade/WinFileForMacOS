@@ -63,6 +63,32 @@ class SvnOperationsTests(unittest.TestCase):
         SvnOperations(str(self.other)).run("update")
         self.assertFalse((self.other / tracked.name).exists())
 
+    def test_manually_removed_file_can_be_scheduled_and_committed_from_status(self):
+        tracked = self.working / "tracked.txt"
+        tracked.write_text("tracked content\n")
+        self.operations.run("add", [str(tracked)])
+        self.operations.run("commit", [str(tracked)], "Add tracked file")
+        other_operations = SvnOperations(str(self.other))
+        other_operations.run("update")
+
+        tracked.unlink()
+        missing = self.operations.changes().for_action("delete")
+        self.assertEqual([Path(item.path) for item in missing], [tracked])
+        self.assertEqual(missing[0].status, "missing")
+
+        self.operations.run("delete", [str(tracked)])
+        scheduled = self.operations.changes().for_action("commit")
+        self.assertIn(tracked, {Path(item.path) for item in scheduled})
+        self.assertEqual(
+            next(item.status for item in scheduled if Path(item.path) == tracked),
+            "deleted",
+        )
+
+        self.operations.run("commit", [str(tracked)], "Remove tracked file")
+        other_operations.run("update")
+        self.assertFalse((self.other / tracked.name).exists())
+        self.assertEqual(self.operations.run("diff"), "No local differences.")
+
     def test_changes_filters_candidates_for_add_delete_and_commit(self):
         tracked = self.working / "tracked.txt"
         scheduled_delete = self.working / "scheduled-delete.txt"
@@ -95,7 +121,7 @@ class SvnOperationsTests(unittest.TestCase):
         )
         self.assertEqual(
             {Path(item.path).name for item in changes.for_action("commit")},
-            {tracked.name},
+            {tracked.name, scheduled_delete.name},
         )
 
     def test_checkout_repository_url_into_explicit_local_folder(self):
@@ -157,6 +183,7 @@ class SvnOperationsTests(unittest.TestCase):
 
     def test_nested_folder_and_empty_working_copy(self):
         self.assertEqual(self.operations.run("status"), "No local changes.")
+        self.assertEqual(self.operations.working_copy_root, str(self.working.resolve()))
         self.assertEqual(self.operations.run("diff"), "No local differences.")
         nested = self.working / "nested"
         nested.mkdir()
@@ -242,7 +269,11 @@ class SvnExplorerIntegrationTests(unittest.TestCase):
                 self.assertEqual(len(actions), 7)
                 self.assertEqual(
                     [actions[index].text() for index in (3, 4, 5)],
-                    ["Add from Status...", "Delete from Status...", "Commit from Status..."],
+                    [
+                        "Add Unversioned Items...",
+                        "Schedule Versioned Deletion...",
+                        "Commit Versioned Changes...",
+                    ],
                 )
                 self.assertTrue(all(actions[index].isEnabled() for index in (3, 4, 5)))
                 with patch.object(self.window, "_start_svn_operation") as start:
@@ -290,9 +321,31 @@ class SvnExplorerIntegrationTests(unittest.TestCase):
 
         commit_dialog = SvnSelectionDialog(changes, "commit", self.window)
         self.addCleanup(commit_dialog.close)
-        self.assertEqual(commit_dialog.file_list.count(), 1)
+        self.assertEqual(commit_dialog.file_list.count(), 2)
         self.assertIn("modified.txt", commit_dialog.file_list.item(0).text())
+        self.assertIn("deleted.txt", commit_dialog.file_list.item(1).text())
         self.assertEqual(commit_dialog.selected_paths(), [])
+
+    def test_empty_selection_dialog_explains_why_there_are_no_candidates(self):
+        from src.dialogs import SvnSelectionDialog
+        from src.svn_operations import SvnChanges
+
+        expected = {
+            "add": "No unversioned items found.",
+            "delete": "No changed or missing tracked items. To delete a clean tracked file, remove it from disk first; it will then appear here.",
+            "commit": "No committable versioned changes found.",
+        }
+        for action, message in expected.items():
+            with self.subTest(action=action):
+                dialog = SvnSelectionDialog(SvnChanges(self.temporary.name, []), action, self.window)
+                self.addCleanup(dialog.close)
+                self.assertEqual(dialog.empty_state_label.text(), message)
+                self.assertFalse(dialog.empty_state_label.isHidden())
+                self.assertTrue(dialog.file_list.isHidden())
+                self.assertFalse(dialog.action_button.isEnabled())
+                if action == "delete":
+                    self.assertIn("remove it from disk first", dialog.description_label.text())
+                    self.assertIn("Commit afterward", dialog.description_label.text())
 
     def test_background_status_checklist_passes_chosen_paths_to_operation(self):
         from PySide6.QtCore import QEventLoop, QTimer
@@ -371,6 +424,30 @@ class SvnExplorerIntegrationTests(unittest.TestCase):
                 start.assert_not_called()
                 self.assertIsNone(self.window._svn_worker)
 
+    def test_session_credentials_are_reused_for_root_and_nested_folder(self):
+        from src.file_explorer import _SVN_SESSION_CREDENTIALS, _SvnWorker
+
+        root = str(Path(self.temporary.name).resolve())
+        credentials = ("svn-user", "svn-secret")
+        previous = _SVN_SESSION_CREDENTIALS.get(root)
+        _SVN_SESSION_CREDENTIALS.pop(root, None)
+        self.addCleanup(
+            lambda: _SVN_SESSION_CREDENTIALS.pop(root, None)
+            if previous is None else _SVN_SESSION_CREDENTIALS.__setitem__(root, previous)
+        )
+        worker = _SvnWorker(root, "status", [], "", credentials)
+        worker.working_copy_root = root
+        self.window._svn_worker = worker
+        with patch.object(self.window, "_show_command_output"):
+            self.window._svn_operation_finished("Status output", True)
+
+        self.assertEqual(self.window._svn_session_credentials(root), credentials)
+        self.assertEqual(
+            self.window._svn_session_credentials(str(Path(root) / "nested" / "folder")),
+            credentials,
+        )
+        self.assertIsNone(self.window._svn_session_credentials(str(Path(root).parent)))
+
     def test_delete_requires_confirmation_and_starts_with_selected_paths(self):
         from PySide6.QtWidgets import QDialog
 
@@ -422,7 +499,9 @@ class SvnExplorerIntegrationTests(unittest.TestCase):
         from PySide6.QtWidgets import QLineEdit
         from src.file_explorer import _SvnWorker
 
-        worker = _SvnWorker(self.temporary.name, "commit", ["selected.txt"], "Commit message")
+        worker = _SvnWorker(
+            self.temporary.name, "commit", ["selected.txt"], "Commit message", ("old-user", "old-secret")
+        )
         worker.authentication_required = True
         self.window._svn_worker = worker
         with patch(

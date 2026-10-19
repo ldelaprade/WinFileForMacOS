@@ -168,6 +168,9 @@ class _VersionControlWorkerSignals(QObject):
     completed = Signal(object, bool)
 
 
+_SVN_SESSION_CREDENTIALS: dict[str, tuple[str, str]] = {}
+
+
 class _GitWorker(QRunnable):
     def __init__(self, directory: str, action: str, paths: list[str], message: str) -> None:
         super().__init__()
@@ -203,6 +206,7 @@ class _SvnWorker(QRunnable):
         self.message = message
         self.credentials = credentials
         self.authentication_required = False
+        self.working_copy_root: str | None = None
         self.signals = _VersionControlWorkerSignals()
 
     def run(self) -> None:
@@ -214,6 +218,7 @@ class _SvnWorker(QRunnable):
                 output = operations.changes()
             else:
                 output = operations.run(self.action, self.paths, self.message)
+            self.working_copy_root = operations.working_copy_root
         except Exception as error:
             self.authentication_required = getattr(error, "authentication_required", False)
             self.signals.completed.emit(str(error), False)
@@ -1143,9 +1148,9 @@ class ExplorerWindow(QMainWindow):
             ("Checkout...", "checkout"),
             ("Working Copy Status...", "status"),
             ("Diff...", "diff"),
-            ("Add from Status...", "add"),
-            ("Delete from Status...", "delete"),
-            ("Commit from Status...", "commit"),
+            ("Add Unversioned Items...", "add"),
+            ("Schedule Versioned Deletion...", "delete"),
+            ("Commit Versioned Changes...", "commit"),
             ("Update", "update"),
         ):
             command = svn_menu.addAction(
@@ -1165,6 +1170,8 @@ class ExplorerWindow(QMainWindow):
             return
         if action not in {"add", "delete", "commit"}:
             return
+        if credentials is None:
+            credentials = self._svn_session_credentials(directory)
         worker = _SvnWorker(directory, f"select_{action}", [], "", credentials)
         worker.signals.completed.connect(self._svn_operation_finished)
         self._svn_worker = worker
@@ -1208,6 +1215,8 @@ class ExplorerWindow(QMainWindow):
             if not message.strip():
                 QMessageBox.warning(self, "SVN", "A commit message is required.")
                 return
+        if credentials is None:
+            credentials = self._svn_session_credentials(directory)
         worker = _SvnWorker(directory, action, paths, message, credentials)
         worker.signals.completed.connect(self._svn_operation_finished)
         self._svn_worker = worker
@@ -1218,8 +1227,10 @@ class ExplorerWindow(QMainWindow):
         worker = self._svn_worker
         self._svn_worker = None
         self._update_status()
+        if succeeded and worker is not None and worker.credentials is not None and worker.working_copy_root:
+            _SVN_SESSION_CREDENTIALS[worker.working_copy_root] = worker.credentials
         if not succeeded:
-            if worker is not None and worker.authentication_required and worker.credentials is None:
+            if worker is not None and worker.authentication_required:
                 username, accepted = QInputDialog.getText(self, "SVN Authentication", "Username:")
                 if accepted and username.strip():
                     password, accepted = QInputDialog.getText(
@@ -1262,6 +1273,16 @@ class ExplorerWindow(QMainWindow):
                 self.navigate_to(worker.paths[1], record_history=True)
         title = "SVN Working Copy Status" if worker is not None and worker.action == "status" else "SVN"
         self._show_command_output(output, title, commands)
+
+    @staticmethod
+    def _svn_session_credentials(directory: str) -> tuple[str, str] | None:
+        path = Path(directory).resolve()
+        matching_roots = (
+            root for root in _SVN_SESSION_CREDENTIALS
+            if path == Path(root) or path.is_relative_to(Path(root))
+        )
+        root = max(matching_roots, key=len, default=None)
+        return _SVN_SESSION_CREDENTIALS.get(root) if root is not None else None
 
     def _show_command_output(
         self, output: str, title: str, commands: dict[str, Callable[[], None]]
