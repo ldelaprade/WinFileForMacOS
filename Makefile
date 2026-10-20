@@ -4,7 +4,7 @@ run:
 # ── Configuration ────────────────────────────────────────────────────────────
 APP_NAME      := WinFileXP
 APP_BUNDLE    := dist/$(APP_NAME).app
-DEB_VERSION   ?= 1.0.0
+DEB_VERSION   ?= 2.0.0
 ifeq ($(OS),Windows_NT)
 DEB_ARCH      ?= amd64
 else

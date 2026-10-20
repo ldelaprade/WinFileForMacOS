@@ -451,6 +451,7 @@ class ExplorerWindow(QMainWindow):
         self.list_view.setAlternatingRowColors(True)
         self.list_view.setSelectionBehavior(QTreeView.SelectRows)
         self.list_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.list_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.list_view.setDragEnabled(True)
         self.list_view.setAcceptDrops(True)
         self.list_view.setDropIndicatorShown(True)
@@ -479,6 +480,7 @@ class ExplorerWindow(QMainWindow):
         self.thumbnail_view.setIconSize(QSize(96, 96))
         self.thumbnail_view.setGridSize(QSize(132, 152))
         self.thumbnail_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.thumbnail_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.thumbnail_view.setDragEnabled(True)
         self.thumbnail_view.setAcceptDrops(True)
         self.thumbnail_view.setDropIndicatorShown(True)
@@ -905,7 +907,7 @@ class ExplorerWindow(QMainWindow):
         if os.path.isdir(path):
             self.navigate_to(path, record_history=True)
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        self._open_file(path)
 
     def _on_thumbnail_double_clicked(self, item: QListWidgetItem) -> None:
         self._defer_thumbnail_apply_after_interaction()
@@ -918,7 +920,7 @@ class ExplorerWindow(QMainWindow):
         if os.path.isdir(path):
             self.navigate_to(path, record_history=True)
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        self._open_file(path)
 
     def _confirm_drag_move(self, destination_path: str, source_paths: list[str]) -> bool:
         message = build_move_confirmation_message(destination_path, source_paths)
@@ -2261,7 +2263,21 @@ class ExplorerWindow(QMainWindow):
         if os.path.isdir(path):
             self.navigate_to(path, record_history=True)
         else:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            self._open_file(path)
+
+    def _open_file(self, path: str) -> None:
+        is_executable = os.path.isfile(path) and (
+            os.access(path, os.X_OK)
+            if os.name != "nt"
+            else Path(path).suffix.lower() in {".com", ".exe"}
+        )
+        if is_executable:
+            try:
+                subprocess.Popen([path], cwd=os.path.dirname(path) or None)
+            except OSError as error:
+                QMessageBox.critical(self, "Open failed", str(error))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     @staticmethod
     def _is_app_bundle(path: str) -> bool:
