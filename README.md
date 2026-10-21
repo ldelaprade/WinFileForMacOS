@@ -1,5 +1,5 @@
-# WinFileForMacOS
-## Windows Style Alternative For MacOS Finder (but with Windows and Linux versions as well)
+# RetroFile
+## A retro-inspired, cross-platform file manager
 
 ### On MacOS
 ![MacOS](macOS.png)
@@ -11,9 +11,9 @@
 ### On Linux
 ![Linux](linux.png)
 
-# WinFile XP (Starter)
+## Overview
 
-A minimal Windows XP-style file explorer starter for macOS using Python and PySide6.
+A classic Windows-inspired file manager for macOS, Windows, and Linux, built with Python and PySide6.
 
 ## Included in this starter
 
@@ -139,14 +139,14 @@ resolution are not included in this initial integration.
 make build
 ```
 
-Outputs `dist/WinFileXP.app`. Drag to `/Applications` or `open dist/WinFileXP.app`.
+Outputs `dist/RetroFile.app`. Drag to `/Applications` or `open dist/RetroFile.app`.
 
 To package an unsigned DMG without an Apple Developer certific
 ```bash
 make unsigned-dmg
 ```
 
-This creates `dist/WinFileXP.dmg` using `hdiutil` (or `create-dmg` if installed).
+This creates `dist/RetroFile.dmg` using `hdiutil` (or `create-dmg` if installed).
 
 ### Trace packaged crashes (recommended when app exits immediately)
 
@@ -156,11 +156,11 @@ Build a console/debug variant and run it from Terminal to see the full traceback
 make trace-debug
 ```
 
-This creates `dist/WinFileXP-debug/WinFileXP-debug` with PyInstaller debug logging.
+This creates `dist/RetroFile-debug/RetroFile-debug` with PyInstaller debug logging.
 If it still exits, check:
 
-- `build/WinFileXP-debug/warn-WinFileXP-debug.txt`
-- `build/WinFileXP-debug/xref-WinFileXP-debug.html`
+- `build/RetroFile-debug/warn-RetroFile-debug.txt`
+- `build/RetroFile-debug/xref-RetroFile-debug.html`
 
 Builds automatically check `.venv`, `.venv-*`, then `python3` and `python`, skipping
 candidates that fail the Python 3.10+ and pip-import checks. An older environment
@@ -178,10 +178,10 @@ On Ubuntu or another Debian-based Linux distribution, build a native `.deb` pack
 
 ```bash
 make build-deb
-sudo apt install ./dist/WinFileXP_1.0.0_amd64.deb
+sudo apt install ./dist/RetroFile_2.0.0_amd64.deb
 ```
 
-The package installs the application under `/opt/WinFileXP` and adds **WinFileXP** to the desktop application menu. Set a different package version when needed:
+The package installs the application under `/opt/RetroFile` and adds **RetroFile** to the desktop application menu. Set a different package version when needed:
 
 ```bash
 make build-deb DEB_VERSION=1.1.0
@@ -190,7 +190,7 @@ make build-deb DEB_VERSION=1.1.0
 To remove it later:
 
 ```bash
-sudo apt remove winfilexp
+sudo apt remove retrofile
 ```
 
 ### Signed + notarized release (for sharing)
@@ -205,7 +205,7 @@ Requirements before running:
 make release
 ```
 
-This runs: build → sign → dmg → notarize → staple. Outputs `dist/WinFileXP.dmg` ready to share.
+This runs: build → sign → dmg → notarize → staple. Outputs `dist/RetroFile.dmg` ready to share.
 
 ## Cleanup
 

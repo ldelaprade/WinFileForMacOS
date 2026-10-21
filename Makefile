@@ -2,7 +2,7 @@
 run:
 	python -m src.main
 # ── Configuration ────────────────────────────────────────────────────────────
-APP_NAME      := WinFileXP
+APP_NAME      := RetroFile
 APP_BUNDLE    := dist/$(APP_NAME).app
 DEB_VERSION   ?= 2.0.0
 ifeq ($(OS),Windows_NT)
@@ -97,30 +97,30 @@ build-deb: build-linux
 	@for size in 16 20 24 32 40 48 64 128 256 512; do \
 		icon_dir="$(DEB_STAGE)/usr/share/icons/hicolor/$${size}x$${size}/apps"; \
 		mkdir -p "$$icon_dir"; \
-		cp "resources/icons/application/png/application-$${size}.png" "$$icon_dir/winfilexp.png"; \
+		cp "resources/icons/application/png/application-$${size}.png" "$$icon_dir/retrofile.png"; \
 	done
 	@cp "dist/$(APP_NAME)" "$(DEB_STAGE)/opt/$(APP_NAME)/$(APP_NAME)"
 	@chmod 755 "$(DEB_STAGE)/opt/$(APP_NAME)/$(APP_NAME)"
 	@printf '%s\n' \
-		'Package: winfilexp' \
+		'Package: retrofile' \
 		'Version: $(DEB_VERSION)' \
 		'Section: utils' \
 		'Priority: optional' \
 		'Architecture: $(DEB_ARCH)' \
-		'Maintainer: WinFileXP contributors' \
+		'Maintainer: RetroFile contributors' \
 		'Description: Windows XP-style file explorer' \
 		' A dual-pane file manager built with Python and PySide6.' \
 		> "$(DEB_STAGE)/DEBIAN/control"
 	@printf '%s\n' \
 		'[Desktop Entry]' \
-		'Name=WinFileXP' \
+		'Name=RetroFile' \
 		'Comment=Windows XP-style file explorer' \
 		'Exec=/opt/$(APP_NAME)/$(APP_NAME)' \
-		'Icon=winfilexp' \
+		'Icon=retrofile' \
 		'Terminal=false' \
 		'Type=Application' \
 		'Categories=Utility;FileManager;' \
-		> "$(DEB_STAGE)/usr/share/applications/winfilexp.desktop"
+		> "$(DEB_STAGE)/usr/share/applications/retrofile.desktop"
 	@dpkg-deb --build "$(DEB_STAGE)" "$(DEB_NAME)" >/dev/null
 	@rm -rf "$(DEB_STAGE)"
 	@echo

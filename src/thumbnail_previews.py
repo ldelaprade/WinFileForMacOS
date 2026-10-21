@@ -241,7 +241,7 @@ class ThumbnailPreviewProvider:
             max(icon_size.width(), icon_size.height(), self.quicklook_min_preview_size)
         )
         try:
-            with tempfile.TemporaryDirectory(prefix="winfile-preview-") as temp_dir:
+            with tempfile.TemporaryDirectory(prefix="retrofile-preview-") as temp_dir:
                 subprocess.run(
                     ["qlmanage", "-t", "-s", preview_size, "-o", temp_dir, path],
                     check=False,

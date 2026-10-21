@@ -77,9 +77,9 @@ class FtpShare:
                 authorizer.add_anonymous(self.path, perm=perm)
 
             # Subclass per-instance so banners/authorizers of concurrent shares don't clash.
-            handler = type(f"WinFileXPFtpHandler{self.port}", (FTPHandler,), {})
+            handler = type(f"RetroFileFtpHandler{self.port}", (FTPHandler,), {})
             handler.authorizer = authorizer
-            handler.banner = f"WinFileXP FTP Share: {self.share_name}"
+            handler.banner = f"RetroFile FTP Share: {self.share_name}"
 
             # Dedicated IOLoop: pyftpdlib defaults to a shared process-wide IOLoop.instance(),
             # which is not safe to poll/close from more than one server thread at once.

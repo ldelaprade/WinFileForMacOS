@@ -2,5 +2,6 @@
 .DS_Store
 dist
 build
-WinFileXP.spec
+RetroFile.spec
+RetroFile-debug.spec
 __pycache__

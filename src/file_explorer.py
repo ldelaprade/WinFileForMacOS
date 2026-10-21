@@ -228,7 +228,7 @@ class _SvnWorker(QRunnable):
 
 class ExplorerWindow(QMainWindow):
     _FAVORITES_SETTINGS_KEY = "favorites/paths"
-    _THIS_PC_HISTORY_ENTRY = "winfilexp://this-pc"
+    _THIS_PC_HISTORY_ENTRY = "retrofile://this-pc"
     _MACHINE_TREE_CHILDREN_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
 
     def __init__(
@@ -237,7 +237,7 @@ class ExplorerWindow(QMainWindow):
         initial_path: str | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("WinFile XP")
+        self.setWindowTitle("RetroFile")
         self.resize(1200, 760)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self._open_new_window_callback = open_new_window_callback
@@ -3157,7 +3157,7 @@ def _set_application_icon(app: QApplication) -> None:
         set_app_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
         set_app_id.argtypes = [ctypes.c_wchar_p]
         set_app_id.restype = ctypes.c_long
-        set_app_id("WinFileXP.WinFileXP")
+        set_app_id("RetroFile.RetroFile")
 
     icon_root = Path(__file__).resolve().parents[1] / "resources" / "icons" / "application"
     if sys.platform == "linux":
@@ -3171,12 +3171,12 @@ def run() -> None:
     app = QApplication([])
     _set_application_icon(app)
     instance_lock = QLockFile(
-        str(Path(QDir.tempPath()) / "WinFileXP.instance.lock")
+        str(Path(QDir.tempPath()) / "RetroFile.instance.lock")
     )
     if not instance_lock.tryLock(0):
         return
 
-    app.setApplicationName("WinFile")
+    app.setApplicationName("RetroFile")
     app.setStyle("Fusion")
     app.setStyleSheet(xp_stylesheet())
 
