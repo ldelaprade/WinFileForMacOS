@@ -99,3 +99,8 @@ def delete_items(paths: list[str]) -> list[str]:
 def create_folder(parent: Path, name: str) -> None:
     destination = parent / name
     destination.mkdir(parents=False, exist_ok=False)
+
+
+def create_file(parent: Path, name: str) -> None:
+    destination = parent / name
+    destination.touch(exist_ok=False)

@@ -21,7 +21,7 @@ A classic Windows-inspired file manager for macOS, Windows, and Linux, built wit
 - Sidebar sections: Favorites, File System, Network
 - Navigation toolbar (Back, Forward, Up, address bar)
 - Status bar (item count and selected size)
-- Context menu operations (Open, Rename, Delete, New Folder, Refresh)
+- Context menu operations (Open, Rename, Delete, New Folder..., New File..., Refresh)
 - Drag-and-drop move between folders
 - Drag selected files out to external apps and web upload drop zones
 - Browse SMB / Samba / NFS network shares via a permanent **Network** node in the left panel

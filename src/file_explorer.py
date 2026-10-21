@@ -111,7 +111,7 @@ from .network_panel import (
 from .ssh_mount import start_ssh_mount
 from .ftp_mount import ftp_mount_error, is_ftp_mount_ready, start_ftp_mount
 from .ftp_server import FtpShare, ftp_server_available, is_local_host
-from .file_operations import create_folder, delete_items, paste_items, rename_item
+from .file_operations import create_file, create_folder, delete_items, paste_items, rename_item
 from .navigation_state import NavigationHistory
 from .drive_report import DriveReportWidget
 from .thumbnail_previews import ThumbnailPreviewProvider
@@ -1003,10 +1003,11 @@ class ExplorerWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Open", self.open_selected)
         menu.addAction("Edit", self.edit_selected)
-        menu.addAction("Rename", self.rename_selected)
-        menu.addAction("Delete", self.delete_selected)
+        menu.addAction("Rename...", self.rename_selected)
+        menu.addAction("Delete...", self.delete_selected)
         menu.addSeparator()
-        menu.addAction("New Folder", self.new_folder)
+        menu.addAction("New Folder...", self.new_folder)
+        menu.addAction("New File...", self.new_file)
         menu.addAction("Open Terminal", self.open_terminal)
         menu.addAction("Refresh", self.refresh)
         menu.addSeparator()
@@ -2402,6 +2403,19 @@ class ExplorerWindow(QMainWindow):
             self.refresh()
         except OSError as error:
             QMessageBox.critical(self, "New Folder failed", str(error))
+
+    def new_file(self) -> None:
+        if self._showing_this_pc:
+            return
+        parent = Path(self.current_path())
+        name, ok = QInputDialog.getText(self, "New File", "File name:")
+        if not ok or not name.strip():
+            return
+        try:
+            create_file(parent, name.strip())
+            self.refresh()
+        except OSError as error:
+            QMessageBox.critical(self, "New File failed", str(error))
 
     def open_terminal(self) -> None:
         if self._showing_this_pc:
