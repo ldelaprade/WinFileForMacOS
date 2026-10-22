@@ -93,6 +93,7 @@ from .dialogs import (
     WindowsShareDialog,
     build_delete_confirmation_message,
     build_move_confirmation_message,
+    build_trash_confirmation_message,
     selection_preview,
 )
 from .dragdrop_views import (
@@ -111,7 +112,14 @@ from .network_panel import (
 from .ssh_mount import start_ssh_mount
 from .ftp_mount import ftp_mount_error, is_ftp_mount_ready, start_ftp_mount
 from .ftp_server import FtpShare, ftp_server_available, is_local_host
-from .file_operations import create_file, create_folder, delete_items, paste_items, rename_item
+from .file_operations import (
+    create_file,
+    create_folder,
+    delete_items,
+    move_items_to_trash,
+    paste_items,
+    rename_item,
+)
 from .navigation_state import NavigationHistory
 from .drive_report import DriveReportWidget
 from .thumbnail_previews import ThumbnailPreviewProvider
@@ -228,6 +236,8 @@ class _SvnWorker(QRunnable):
 
 class ExplorerWindow(QMainWindow):
     _FAVORITES_SETTINGS_KEY = "favorites/paths"
+    _SYSTEM_TRASH_FAVORITE = "retrofile://system-trash"
+    _TRASH_MODE_SETTINGS_KEY = "behavior/use_system_trash"
     _THIS_PC_HISTORY_ENTRY = "retrofile://this-pc"
     _MACHINE_TREE_CHILDREN_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -242,6 +252,9 @@ class ExplorerWindow(QMainWindow):
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self._open_new_window_callback = open_new_window_callback
         self._settings = QSettings("WinFileXP", "WinFileXP")
+        self._trash_mode_enabled = self._settings.value(
+            self._TRASH_MODE_SETTINGS_KEY, False, type=bool
+        )
         self._computer_name = platform.node() or "Computer"
         self._favorite_paths = self._load_favorite_paths()
         if not self._settings.contains(self._FAVORITES_SETTINGS_KEY):
@@ -587,6 +600,20 @@ class ExplorerWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        self.trash_mode_action = QAction("Use System Trash", self)
+        self.trash_mode_action.setCheckable(True)
+        self.trash_mode_action.setChecked(self._trash_mode_enabled)
+        self.trash_mode_action.toggled.connect(self._on_trash_mode_toggled)
+        self._update_trash_mode_action()
+        self._trash_mode_button = self._create_toolbar_button(
+            action=self.trash_mode_action,
+            tooltip=self.trash_mode_action.toolTip(),
+            icon=self.trash_mode_action.icon(),
+        )
+        toolbar.addWidget(self._trash_mode_button)
+
+        toolbar.addSeparator()
+
         self.view_mode_widget = QWidget(self)
         self.view_mode_layout = QHBoxLayout(self.view_mode_widget)
         self.view_mode_layout.setContentsMargins(0, 0, 0, 0)
@@ -616,6 +643,36 @@ class ExplorerWindow(QMainWindow):
         file_menu.addAction(self.new_window_action)
         file_menu.addSeparator()
         file_menu.addAction(self.close_window_action)
+
+    def _on_trash_mode_toggled(self, enabled: bool) -> None:
+        self._settings.setValue(self._TRASH_MODE_SETTINGS_KEY, enabled)
+        for window in QApplication.topLevelWidgets():
+            if isinstance(window, ExplorerWindow):
+                window._apply_trash_mode(enabled)
+
+    def _apply_trash_mode(self, enabled: bool) -> None:
+        self._trash_mode_enabled = enabled
+        if not hasattr(self, "trash_mode_action"):
+            return
+        was_blocked = self.trash_mode_action.blockSignals(True)
+        self.trash_mode_action.setChecked(enabled)
+        self.trash_mode_action.blockSignals(was_blocked)
+        self._update_trash_mode_action()
+
+    def _update_trash_mode_action(self) -> None:
+        if not hasattr(self, "trash_mode_action"):
+            return
+        self.trash_mode_action.setIcon(
+            self._build_trash_mode_icon(self._trash_mode_enabled)
+        )
+        if self._trash_mode_enabled:
+            tooltip = "Trash mode is on. Delete moves items to the system Trash."
+        else:
+            tooltip = "Trash mode is off. Delete permanently removes items."
+        self.trash_mode_action.setToolTip(tooltip)
+        self.trash_mode_action.setStatusTip(tooltip)
+        if hasattr(self, "_trash_mode_button"):
+            self._trash_mode_button.setToolTip(tooltip)
 
     def _setup_statusbar(self) -> None:
         self.status = QStatusBar(self)
@@ -1004,7 +1061,8 @@ class ExplorerWindow(QMainWindow):
         menu.addAction("Open", self.open_selected)
         menu.addAction("Edit", self.edit_selected)
         menu.addAction("Rename...", self.rename_selected)
-        menu.addAction("Delete...", self.delete_selected)
+        delete_label = "Move to Trash..." if self._trash_mode_enabled else "Delete..."
+        menu.addAction(delete_label, self.delete_selected)
         menu.addSeparator()
         menu.addAction("New Folder...", self.new_folder)
         menu.addAction("New File...", self.new_file)
@@ -1317,18 +1375,19 @@ class ExplorerWindow(QMainWindow):
     def _show_favorites_context_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)
         menu.addAction("Add Current Folder", lambda: self._add_favorite_with_feedback(self.current_path()))
+        menu.addAction("Add Recycle Bin Folder", self._add_system_trash_favorite)
 
         item = self.favorites_view.itemAt(pos)
         if item is not None:
             path = item.data(Qt.UserRole)
             if isinstance(path, str) and path:
                 menu.addSeparator()
-                menu.addAction("Open", lambda current_path=path: self.navigate_to(current_path, record_history=True))
+                menu.addAction("Open", lambda current_path=path: self._open_favorite(current_path))
                 menu.addAction("Remove", lambda current_path=path: self._remove_favorite_path(current_path))
                 menu.addSeparator()
                 if path in self._ftp_shares:
                     menu.addAction("Stop FTP Share", lambda current_path=path: self._stop_ftp_share(current_path))
-                else:
+                elif path != self._SYSTEM_TRASH_FAVORITE:
                     menu.addAction("FTP Share...", lambda current_path=path: self._start_ftp_share(current_path))
 
         menu.exec(self.favorites_view.viewport().mapToGlobal(pos))
@@ -1438,6 +1497,12 @@ class ExplorerWindow(QMainWindow):
         path = item.data(Qt.UserRole)
         if not isinstance(path, str) or not path:
             return
+        self._open_favorite(path)
+
+    def _open_favorite(self, path: str) -> None:
+        if path == self._SYSTEM_TRASH_FAVORITE:
+            self._open_system_trash()
+            return
         if not os.path.isdir(path):
             QMessageBox.warning(
                 self,
@@ -1446,6 +1511,26 @@ class ExplorerWindow(QMainWindow):
             )
             return
         self.navigate_to(path, record_history=True)
+
+    def _open_system_trash(self) -> None:
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(Path.home() / ".Trash")])
+            elif sys.platform == "win32":
+                subprocess.Popen(["explorer.exe", "shell:RecycleBinFolder"])
+            elif not QDesktopServices.openUrl(QUrl("trash:///")):
+                raise OSError("No desktop handler is available for the system Trash.")
+        except OSError as error:
+            QMessageBox.warning(self, "Recycle Bin", f"Could not open the system Trash:\n{error}")
+
+    def _add_system_trash_favorite(self) -> None:
+        if self._SYSTEM_TRASH_FAVORITE in self._favorite_paths:
+            self.status.showMessage("Recycle Bin is already in Favorites", 1800)
+            return
+        self._favorite_paths.append(self._SYSTEM_TRASH_FAVORITE)
+        self._save_favorite_paths()
+        self._refresh_favorites_view()
+        self.status.showMessage("Added Recycle Bin to Favorites", 1800)
 
     def _handle_favorites_drop(self, dropped_paths: list[str]) -> bool:
         added = False
@@ -1503,6 +1588,11 @@ class ExplorerWindow(QMainWindow):
         for raw_path in stored_paths:
             if not isinstance(raw_path, str):
                 continue
+            if raw_path == self._SYSTEM_TRASH_FAVORITE:
+                if raw_path not in seen:
+                    seen.add(raw_path)
+                    cleaned.append(raw_path)
+                continue
             normalized = os.path.abspath(os.path.expanduser(raw_path.strip()))
             if not normalized or not os.path.isdir(normalized):
                 continue
@@ -1521,10 +1611,19 @@ class ExplorerWindow(QMainWindow):
         icon = self.fs_model.iconProvider().icon(QFileIconProvider.Folder)
         shared_icon = self._build_shared_folder_icon(icon)
         for path in self._favorite_paths:
-            item = QListWidgetItem(path)
+            is_system_trash = path == self._SYSTEM_TRASH_FAVORITE
+            label = "Recycle Bin" if is_system_trash else path
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, path)
-            item.setToolTip(path)
-            item.setIcon(shared_icon if path in self._ftp_shares else icon)
+            item.setToolTip(
+                "Open the system Trash to restore or permanently remove items"
+                if is_system_trash
+                else path
+            )
+            if is_system_trash:
+                item.setIcon(self.fs_model.iconProvider().icon(QFileIconProvider.Trashcan))
+            else:
+                item.setIcon(shared_icon if path in self._ftp_shares else icon)
             self.favorites_view.addItem(item)
 
     @staticmethod
@@ -2381,15 +2480,36 @@ class ExplorerWindow(QMainWindow):
         if not paths:
             return
 
-        dialog = DeleteConfirmDialog(build_delete_confirmation_message(paths), self)
+        move_to_trash = self._trash_mode_enabled
+        if move_to_trash:
+            dialog = DeleteConfirmDialog(
+                build_trash_confirmation_message(paths),
+                self,
+                title="Move to Trash",
+                accept_label="Move to Trash",
+            )
+        else:
+            dialog = DeleteConfirmDialog(build_delete_confirmation_message(paths), self)
         if dialog.exec() != QDialog.Accepted:
             return
 
-        failures = delete_items(paths)
+        failures = (
+            move_items_to_trash(paths)
+            if move_to_trash
+            else delete_items(paths)
+        )
 
         self.refresh()
         if failures:
-            QMessageBox.warning(self, "Delete", "Some items could not be deleted:\n" + "\n".join(failures))
+            if move_to_trash:
+                message = "Some items could not be moved to the system Trash:\n"
+                title = "Move to Trash"
+            else:
+                message = "Some items could not be deleted:\n"
+                title = "Delete"
+            QMessageBox.warning(self, title, message + "\n".join(failures))
+        elif move_to_trash:
+            self.status.showMessage(f"Moved {len(paths)} item(s) to Trash", 3000)
 
     def new_folder(self) -> None:
         if self._showing_this_pc:
@@ -3079,6 +3199,42 @@ class ExplorerWindow(QMainWindow):
         elif kind == "refresh":
             ExplorerWindow.draw_refresh_icon(painter)
 
+        painter.end()
+        return QIcon(pixmap)
+
+    @staticmethod
+    def _build_trash_mode_icon(enabled: bool) -> QIcon:
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(
+            QPen(
+                QColor("#777777"),
+                1.6,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(4, 5, 16, 5)
+        painter.drawLine(8, 3, 12, 3)
+        painter.drawLine(6, 6, 7, 17)
+        painter.drawLine(14, 6, 13, 17)
+        painter.drawLine(7, 17, 13, 17)
+        painter.drawLine(9, 8, 9, 14)
+        painter.drawLine(11, 8, 11, 14)
+        if not enabled:
+            painter.setPen(
+                QPen(
+                    QColor("#d32f2f"),
+                    2.4,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                )
+            )
+            painter.drawLine(3, 17, 17, 3)
         painter.end()
         return QIcon(pixmap)
 

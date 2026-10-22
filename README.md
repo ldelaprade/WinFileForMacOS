@@ -21,13 +21,15 @@ A classic Windows-inspired file manager for macOS, Windows, and Linux, built wit
 - Sidebar sections: Favorites, File System, Network
 - Navigation toolbar (Back, Forward, Up, address bar)
 - Status bar (item count and selected size)
-- Context menu operations (Open, Rename, Delete, New Folder..., New File..., Refresh)
+- Context menu operations (Open, Rename, Delete/Move to Trash, New Folder..., New File..., Refresh)
+- Global system Trash mode toggle beside Refresh; when enabled, selected items go to the OS Trash/Recycle Bin
 - Drag-and-drop move between folders
 - Drag selected files out to external apps and web upload drop zones
 - Browse SMB / Samba / NFS network shares via a permanent **Network** node in the left panel
 - Shortcuts: `F2` rename, `Delete` remove, `F5` refresh, `Alt+Left/Right` back/forward, `Alt+Up` or `Backspace` parent, `Ctrl+A` select all, `Enter` open, `Ctrl+C/X/V` copy-cut-paste, `Alt+D` or `Ctrl+L` focus path
 - Right pane supports multi-selection for bulk move/delete
 - Favorites are persisted across launches (bookmarks are restored on startup)
+- Add **Recycle Bin** to Favorites to open the OS Trash/Recycle Bin and restore items
 - Favorites can be re-ordered by drag-and-drop
 - Git context menu: repository cloning and status, stage/unstage selected items, staged diffs, commits, and repository initialization
 - SVN context menu: working-copy status, diffs, add selected items, commit selected items, and update
@@ -50,7 +52,7 @@ python -m src.main
 ## Notes
 
 - This is an MVP starter aimed at classic explorer behavior.
-- Deletion is permanent in this version (no trash integration yet).
+- System Trash mode is off by default, so Delete permanently removes selected items as before. Turn it on with the trash-can toolbar button beside Refresh to move items to the OS Trash/Recycle Bin instead.
 - Drag-and-drop move now asks for confirmation with item count and destination preview.
 - Delete confirmation now shows selected item names/count.
 - To browse a network share: right-click the **Network** node in the left panel → *Connect Network Share…* and enter a network path. Use SMB URL on macOS/Linux (e.g. `smb://server/share` or `smb://server/share/folder`) and UNC path on Windows (e.g. `\\server\share` or `\\server\share\folder`). Alternatively, type it directly in the address bar and press Enter. On macOS, login prompts may appear and the share then appears under *Network*.

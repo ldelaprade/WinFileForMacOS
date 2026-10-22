@@ -5,6 +5,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from send2trash import send2trash
+
 
 @dataclass
 class PasteResult:
@@ -91,6 +93,16 @@ def delete_items(paths: list[str]) -> list[str]:
                 shutil.rmtree(path)
             else:
                 os.remove(path)
+        except OSError as error:
+            failures.append(f"{path}: {error}")
+    return failures
+
+
+def move_items_to_trash(paths: list[str]) -> list[str]:
+    failures: list[str] = []
+    for path in paths:
+        try:
+            send2trash(path)
         except OSError as error:
             failures.append(f"{path}: {error}")
     return failures

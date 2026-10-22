@@ -547,10 +547,25 @@ def build_delete_confirmation_message(paths: list[str]) -> str:
     return f"Delete {item_count} items permanently?\n\n{preview}"
 
 
+def build_trash_confirmation_message(paths: list[str]) -> str:
+    item_count = len(paths)
+    preview = selection_preview(paths)
+    if item_count == 1:
+        return f"Move this item to the system Trash?\n\n{preview}"
+    return f"Move {item_count} items to the system Trash?\n\n{preview}"
+
+
 class DeleteConfirmDialog(QDialog):
-    def __init__(self, message: str, parent: QMainWindow | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        parent: QMainWindow | None = None,
+        *,
+        title: str = "Delete",
+        accept_label: str = "Yes",
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Delete")
+        self.setWindowTitle(title)
         self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
         self.setModal(True)
 
@@ -560,7 +575,7 @@ class DeleteConfirmDialog(QDialog):
         layout.addWidget(text_label)
 
         self.button_box = QDialogButtonBox(self)
-        self.yes_button = self.button_box.addButton("Yes", QDialogButtonBox.AcceptRole)
+        self.yes_button = self.button_box.addButton(accept_label, QDialogButtonBox.AcceptRole)
         self.no_button = self.button_box.addButton("No", QDialogButtonBox.RejectRole)
 
         self.no_button.setDefault(True)
