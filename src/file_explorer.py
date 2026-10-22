@@ -1377,11 +1377,11 @@ class ExplorerWindow(QMainWindow):
         menu.addAction("Add Current Folder", lambda: self._add_favorite_with_feedback(self.current_path()))
         menu.addAction(
             "Add Desktop Folder",
-            lambda: self._add_favorite_with_feedback(str(Path.home() / "Desktop")),
+            lambda: self._add_favorite_with_feedback(self._user_folder_path("Desktop")),
         )
         menu.addAction(
             "Add Download Folder",
-            lambda: self._add_favorite_with_feedback(str(Path.home() / "Downloads")),
+            lambda: self._add_favorite_with_feedback(self._user_folder_path("Downloads")),
         )
         menu.addSeparator()
         menu.addAction("Add Recycle Bin Folder", self._add_system_trash_favorite)
@@ -1400,6 +1400,30 @@ class ExplorerWindow(QMainWindow):
                     menu.addAction("FTP Share...", lambda current_path=path: self._start_ftp_share(current_path))
 
         menu.exec(self.favorites_view.viewport().mapToGlobal(pos))
+
+    @staticmethod
+    def _user_folder_path(folder_name: str) -> str:
+        if sys.platform == "win32":
+            registry_value_names = {
+                "Desktop": "Desktop",
+                "Downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+            }
+            value_name = registry_value_names.get(folder_name)
+            if value_name is not None:
+                try:
+                    import winreg
+
+                    with winreg.OpenKey(
+                        winreg.HKEY_CURRENT_USER,
+                        r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+                    ) as key:
+                        value, _value_type = winreg.QueryValueEx(key, value_name)
+                    if isinstance(value, str) and value.strip():
+                        return os.path.expandvars(value.strip())
+                except (ImportError, OSError):
+                    pass
+
+        return str(Path.home() / folder_name)
 
     def _start_ftp_share(self, path: str) -> None:
         if not os.path.isdir(path):
