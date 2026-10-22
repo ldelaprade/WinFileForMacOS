@@ -1375,6 +1375,15 @@ class ExplorerWindow(QMainWindow):
     def _show_favorites_context_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)
         menu.addAction("Add Current Folder", lambda: self._add_favorite_with_feedback(self.current_path()))
+        menu.addAction(
+            "Add Desktop Folder",
+            lambda: self._add_favorite_with_feedback(str(Path.home() / "Desktop")),
+        )
+        menu.addAction(
+            "Add Download Folder",
+            lambda: self._add_favorite_with_feedback(str(Path.home() / "Downloads")),
+        )
+        menu.addSeparator()
         menu.addAction("Add Recycle Bin Folder", self._add_system_trash_favorite)
 
         item = self.favorites_view.itemAt(pos)

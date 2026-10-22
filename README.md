@@ -30,6 +30,7 @@ A classic Windows-inspired file manager for macOS, Windows, and Linux, built wit
 - Right pane supports multi-selection for bulk move/delete
 - Favorites are persisted across launches (bookmarks are restored on startup)
 - Add **Recycle Bin** to Favorites to open the OS Trash/Recycle Bin and restore items
+- Favorites context menu can add the current folder, Desktop, Downloads, or Recycle Bin
 - Favorites can be re-ordered by drag-and-drop
 - Git context menu: repository cloning and status, stage/unstage selected items, staged diffs, commits, and repository initialization
 - SVN context menu: working-copy status, diffs, add selected items, commit selected items, and update
