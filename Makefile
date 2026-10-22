@@ -4,7 +4,7 @@ run:
 # ── Configuration ────────────────────────────────────────────────────────────
 APP_NAME      := RetroFile
 APP_BUNDLE    := dist/$(APP_NAME).app
-DEB_VERSION   ?= 2.0.0
+DEB_VERSION   ?= 2.0.1
 ifeq ($(OS),Windows_NT)
 DEB_ARCH      ?= amd64
 else

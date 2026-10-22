@@ -10,8 +10,11 @@
             "type": "debugpy",
             "request": "launch",
             "module": "src.main",
-            "console": "integratedTerminal",
-            "args": "${command:pickArgs}"
+
+            "args": "${command:pickArgs}",
+            "env": {
+                "LD_LIBRARY_PATH": "/__no_ld_library_path__"
+            }
         },
         {
             "name": "Python Debugger: Unit Tests",
@@ -22,7 +25,8 @@
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "env": {
-                "QT_QPA_PLATFORM": "offscreen"
+                "QT_QPA_PLATFORM": "offscreen",
+                "LD_LIBRARY_PATH": "/__no_ld_library_path__"
             }
         }
     ]

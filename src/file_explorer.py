@@ -1518,7 +1518,7 @@ class ExplorerWindow(QMainWindow):
                 subprocess.Popen(["open", str(Path.home() / ".Trash")])
             elif sys.platform == "win32":
                 subprocess.Popen(["explorer.exe", "shell:RecycleBinFolder"])
-            elif not QDesktopServices.openUrl(QUrl("trash:///")):
+            elif not QDesktopServices.openUrl(QUrl(r"trash:///")):
                 raise OSError("No desktop handler is available for the system Trash.")
         except OSError as error:
             QMessageBox.warning(self, "Recycle Bin", f"Could not open the system Trash:\n{error}")
@@ -2373,7 +2373,24 @@ class ExplorerWindow(QMainWindow):
         )
         if is_executable:
             try:
-                subprocess.Popen([path], cwd=os.path.dirname(path) or None)
+                launch_environment = os.environ.copy()
+                library_path = launch_environment.get("LD_LIBRARY_PATH")
+                if library_path:
+                    library_directories = [
+                        directory
+                        for directory in library_path.split(os.pathsep)
+                        if not os.path.normpath(directory).startswith("/snap/core20/")
+                        and os.path.normpath(directory) != "/snap/core20"
+                    ]
+                    if library_directories:
+                        launch_environment["LD_LIBRARY_PATH"] = os.pathsep.join(
+                            library_directories
+                        )
+                    else:
+                        launch_environment.pop("LD_LIBRARY_PATH")
+                subprocess.Popen(
+                    [path], cwd=os.path.dirname(path) or None, env=launch_environment
+                )
             except OSError as error:
                 QMessageBox.critical(self, "Open failed", str(error))
             return

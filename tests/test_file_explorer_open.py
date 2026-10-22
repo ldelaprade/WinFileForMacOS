@@ -15,13 +15,27 @@ class FileExplorerOpenTests(unittest.TestCase):
             executable.write_text("#!/bin/sh\nexit 0\n")
             executable.chmod(0o755)
 
-            with (
-                patch("src.file_explorer.subprocess.Popen") as popen,
-                patch("src.file_explorer.QDesktopServices.openUrl") as open_url,
+            custom_library_path = str(Path(directory) / "custom-libraries")
+            with patch.dict(
+                os.environ,
+                {
+                    "LD_LIBRARY_PATH": os.pathsep.join(
+                        ("/snap/core20/current/lib/x86_64-linux-gnu", custom_library_path)
+                    )
+                },
             ):
-                ExplorerWindow._open_file(object(), str(executable))
+                with (
+                    patch("src.file_explorer.subprocess.Popen") as popen,
+                    patch("src.file_explorer.QDesktopServices.openUrl") as open_url,
+                ):
+                    ExplorerWindow._open_file(object(), str(executable))
 
-            popen.assert_called_once_with([str(executable)], cwd=directory)
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0], [str(executable)])
+            self.assertEqual(popen.call_args.kwargs["cwd"], directory)
+            self.assertEqual(
+                popen.call_args.kwargs["env"]["LD_LIBRARY_PATH"], custom_library_path
+            )
             open_url.assert_not_called()
 
     def test_open_uses_desktop_association_for_non_executable_file(self):
