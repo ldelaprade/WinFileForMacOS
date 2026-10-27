@@ -34,6 +34,7 @@ A classic Windows-inspired file manager for macOS, Windows, and Linux, built wit
 - Favorites can be re-ordered by drag-and-drop
 - Git context menu: repository cloning and status, stage/unstage selected items, staged diffs, commits, and repository initialization
 - SVN context menu: working-copy status, diffs, add selected items, commit selected items, and update
+- Windows subst drives appear under Local Machine and Drives with their target paths. Right-click a mapped drive and choose **Unsubst...** to remove it. Answering **Yes** to **Drop content as well?** permanently deletes the original target folder's contents before unmapping; **No** preserves them, and **Cancel** makes no changes.
 
 ## Requirements
 

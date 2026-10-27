@@ -821,6 +821,74 @@ class FtpLocationDialog(QDialog):
         }
 
 
+class VfsMountDialog(QDialog):
+    def __init__(
+        self,
+        source_folder: str,
+        default_target: str,
+        drive_letters: list[str],
+        parent: QMainWindow | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Mount as VFS")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        source_label = QLabel(source_folder, self)
+        source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Recordings:", source_label)
+
+        self.target_edit = QLineEdit(self)
+        self.target_edit.setText(default_target)
+        browse_button = QPushButton("Browse...", self)
+        browse_button.clicked.connect(self._browse_target)
+        target_row = QHBoxLayout()
+        target_row.addWidget(self.target_edit, 1)
+        target_row.addWidget(browse_button)
+        form.addRow("VFS Folder:", target_row)
+
+        self.drive_combo = QComboBox(self)
+        for letter in drive_letters:
+            self.drive_combo.addItem(f"{letter}:", letter)
+        form.addRow("Drive Letter:", self.drive_combo)
+
+        layout.addLayout(form)
+        layout.addWidget(
+            QLabel("APVDF000.vfs is created in the VFS folder, which is then mapped to the drive letter.", self)
+        )
+
+        buttons = QDialogButtonBox(self)
+        buttons.addButton("Cancel", QDialogButtonBox.RejectRole)
+        buttons.addButton("Mount", QDialogButtonBox.AcceptRole)
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _browse_target(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "VFS Folder", self.target_edit.text().strip())
+        if folder:
+            self.target_edit.setText(folder)
+
+    def _accept_if_valid(self) -> None:
+        if not self.target_edit.text().strip():
+            QMessageBox.warning(self, "Mount as VFS", "Choose the folder where the VFS file will be created.")
+            self.target_edit.setFocus()
+            return
+        if self.drive_combo.currentData() is None:
+            QMessageBox.warning(self, "Mount as VFS", "No free drive letter is available.")
+            return
+        self.accept()
+
+    def values(self) -> dict[str, str]:
+        return {
+            "target_folder": self.target_edit.text().strip(),
+            "drive_letter": str(self.drive_combo.currentData()),
+        }
+
+
 class FtpShareDialog(QDialog):
     def __init__(self, default_share_name: str, parent: QMainWindow | None = None) -> None:
         super().__init__(parent)

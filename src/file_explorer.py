@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -90,6 +91,7 @@ from .dialogs import (
     GitStagingDialog,
     SvnCheckoutDialog,
     SvnSelectionDialog,
+    VfsMountDialog,
     WindowsShareDialog,
     build_delete_confirmation_message,
     build_move_confirmation_message,
@@ -119,6 +121,14 @@ from .file_operations import (
     move_items_to_trash,
     paste_items,
     rename_item,
+)
+from .airs_vfs import (
+    DriveError,
+    VfsError,
+    available_drive_letters,
+    folder_has_recordings,
+    mount_as_vfs,
+    unmount_drive,
 )
 from .navigation_state import NavigationHistory
 from .drive_report import DriveReportWidget
@@ -177,6 +187,54 @@ class _VersionControlWorkerSignals(QObject):
 
 
 _SVN_SESSION_CREDENTIALS: dict[str, tuple[str, str]] = {}
+
+
+class _VfsMountWorkerSignals(QObject):
+    progress = Signal(int, int)
+    completed = Signal(object, bool)
+
+
+class _VfsMountWorker(QRunnable):
+    def __init__(self, source_folder: str, target_folder: str, drive_letter: str) -> None:
+        super().__init__()
+        self.source_folder = source_folder
+        self.target_folder = target_folder
+        self.drive_letter = drive_letter
+        self.signals = _VfsMountWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            vfs_file = mount_as_vfs(
+                self.source_folder,
+                self.target_folder,
+                self.drive_letter,
+                progress=self.signals.progress.emit,
+            )
+        except (VfsError, DriveError, OSError) as error:
+            self.signals.completed.emit(str(error), False)
+        else:
+            self.signals.completed.emit(str(vfs_file), True)
+
+
+class _VfsUnmountWorker(QRunnable):
+    def __init__(self, drive_letter: str, target: str | None, delete_contents: bool) -> None:
+        super().__init__()
+        self.drive_letter = drive_letter
+        self.target = target
+        self.delete_contents = delete_contents
+        self.signals = _VfsMountWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            unmount_drive(
+                self.drive_letter,
+                delete_contents=self.delete_contents,
+                expected_target=self.target,
+            )
+        except (DriveError, OSError) as error:
+            self.signals.completed.emit(str(error), False)
+        else:
+            self.signals.completed.emit(self.drive_letter, True)
 
 
 class _GitWorker(QRunnable):
@@ -247,7 +305,7 @@ class ExplorerWindow(QMainWindow):
         initial_path: str | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("RetroFile")
+        self.setWindowTitle("RetroFile Manager")
         self.resize(1200, 760)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self._open_new_window_callback = open_new_window_callback
@@ -281,6 +339,13 @@ class ExplorerWindow(QMainWindow):
         self._ftp_mount_process: subprocess.Popen[bytes] | None = None
         self._ftp_mount_path: Path | None = None
         self._ftp_shares: dict[str, FtpShare] = {}
+        self._vfs_thread_pool = QThreadPool(self)
+        self._vfs_thread_pool.setMaxThreadCount(1)
+        self._vfs_worker: _VfsMountWorker | None = None
+        self._vfs_progress: QProgressDialog | None = None
+        self._unsubst_worker: _VfsUnmountWorker | None = None
+        self._unsubst_progress: QProgressDialog | None = None
+        self._vfs_drives: dict[str, str] = {}
         self._thumbnail_render_token = 0
         self._thumbnail_pending_items: list[tuple[QListWidgetItem, str]] = []
         self._thumbnail_pending_index = 0
@@ -484,6 +549,8 @@ class ExplorerWindow(QMainWindow):
 
         self.drive_report = DriveReportWidget(self.content_stack)
         self.drive_report.drive_activated.connect(self._on_drive_activated)
+        self.drive_report.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.drive_report.table.customContextMenuRequested.connect(self._show_drive_report_context_menu)
         self.content_stack.addWidget(self.drive_report)
         self._refresh_machine_tree()
 
@@ -758,6 +825,7 @@ class ExplorerWindow(QMainWindow):
         drive_icon = self.fs_model.iconProvider().icon(QFileIconProvider.Drive)
         for label, path in self.drive_report.drive_entries:
             drive_item = QTreeWidgetItem([label])
+            drive_item.setToolTip(0, label)
             drive_item.setIcon(0, drive_icon)
             drive_item.setData(0, Qt.ItemDataRole.UserRole, path)
             drive_item.setData(0, self._MACHINE_TREE_CHILDREN_LOADED_ROLE, False)
@@ -883,6 +951,10 @@ class ExplorerWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._git_worker is not None or self._svn_worker is not None:
             QMessageBox.information(self, "Version Control", "Wait for the current version-control operation to finish before closing.")
+            event.ignore()
+            return
+        if self._vfs_worker is not None:
+            QMessageBox.information(self, "Mount as VFS", "Wait for the VFS operation to finish before closing.")
             event.ignore()
             return
         for share in list(self._ftp_shares.values()):
@@ -1071,6 +1143,7 @@ class ExplorerWindow(QMainWindow):
         menu.addSeparator()
         self._add_git_menu(menu)
         self._add_svn_menu(menu)
+        self._add_vfs_actions(menu)
         menu.addSeparator()
         self._add_show_hidden_action(menu)
         source = self.sender()
@@ -1079,6 +1152,86 @@ class ExplorerWindow(QMainWindow):
         else:
             global_pos = self.mapToGlobal(pos)
         menu.exec(global_pos)
+
+    def _vfs_candidate_folder(self) -> str | None:
+        if self._showing_this_pc:
+            return None
+        paths = self.selected_paths()
+        if len(paths) > 1:
+            return None
+        folder = paths[0] if paths else self.current_path()
+        if os.path.isdir(folder) and folder_has_recordings(folder):
+            return folder
+        return None
+
+    def _add_vfs_actions(self, menu: QMenu) -> None:
+        # The VFS drive is mapped with the Windows 'subst' command.
+        if sys.platform != "win32":
+            return
+        folder = self._vfs_candidate_folder()
+        if folder is None and not self._vfs_drives:
+            return
+        menu.addSeparator()
+        if folder is not None:
+            menu.addAction("Mount as VFS...", lambda source=folder: self._mount_as_vfs(source))
+        for letter in sorted(self._vfs_drives):
+            menu.addAction(f"Unmount VFS Drive {letter}:", lambda drive=letter: self._unmount_vfs_drive(drive))
+
+    def _mount_as_vfs(self, source_folder: str) -> None:
+        if self._vfs_worker is not None or self._unsubst_worker is not None:
+            QMessageBox.information(self, "Mount as VFS", "Wait for the current VFS operation to finish.")
+            return
+        letters = available_drive_letters()
+        if not letters:
+            QMessageBox.warning(self, "Mount as VFS", "No free drive letter is available.")
+            return
+        default_target = str(Path.home() / "AIRS_VFS" / (Path(source_folder).name or "card"))
+        dialog = VfsMountDialog(source_folder, default_target, letters, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        values = dialog.values()
+        target = values["target_folder"]
+        if os.path.normcase(os.path.abspath(target)) == os.path.normcase(os.path.abspath(source_folder)):
+            QMessageBox.warning(self, "Mount as VFS", "The VFS folder must differ from the recordings folder.")
+            return
+        worker = _VfsMountWorker(source_folder, target, values["drive_letter"])
+        progress = QProgressDialog("Creating VFS image...", "", 0, 100, self)
+        progress.setWindowTitle("Mount as VFS")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        worker.signals.progress.connect(self._on_vfs_progress)
+        worker.signals.completed.connect(self._on_vfs_completed)
+        self._vfs_worker = worker
+        self._vfs_progress = progress
+        self._vfs_thread_pool.start(worker)
+
+    def _on_vfs_progress(self, done: int, total: int) -> None:
+        if self._vfs_progress is not None and total > 0:
+            self._vfs_progress.setValue(min(99, int(done * 100 / total)))
+
+    def _on_vfs_completed(self, result: object, success: bool) -> None:
+        worker = self._vfs_worker
+        self._vfs_worker = None
+        if self._vfs_progress is not None:
+            self._vfs_progress.close()
+            self._vfs_progress = None
+        if not success or worker is None:
+            QMessageBox.warning(self, "Mount as VFS", f"Could not mount VFS:\n{result}")
+            return
+        self._vfs_drives[worker.drive_letter] = worker.target_folder
+        self.refresh()
+        self.status.showMessage(f"VFS mounted as {worker.drive_letter}:", 4000)
+        QMessageBox.information(
+            self,
+            "Mount as VFS",
+            f"Created:\n{result}\n\nMapped to drive {worker.drive_letter}:",
+        )
+
+    def _unmount_vfs_drive(self, letter: str) -> None:
+        self._start_unsubst(letter, self._vfs_drives.get(letter), False)
 
     def _add_git_menu(self, menu: QMenu) -> None:
         git_menu = QMenu("Git", menu)
@@ -1483,9 +1636,74 @@ class ExplorerWindow(QMainWindow):
         if isinstance(path, str) and path:
             menu.addAction("Browse", lambda target_path=path: self.navigate_to(target_path, record_history=True))
             menu.addAction("Add to Favorites", lambda target_path=path: self._add_favorite_with_feedback(target_path))
+            self._add_unsubst_action(menu, path)
             menu.addSeparator()
         self._add_show_hidden_action(menu)
         menu.exec(self.this_pc_view.viewport().mapToGlobal(pos))
+
+    def _show_drive_report_context_menu(self, pos: QPoint) -> None:
+        item = self.drive_report.table.itemAt(pos)
+        if item is None:
+            return
+        _label, path = self.drive_report.drive_entries[item.row()]
+        menu = QMenu(self)
+        menu.addAction("Browse", lambda: self.navigate_to(path, record_history=True))
+        self._add_unsubst_action(menu, path)
+        menu.exec(self.drive_report.table.viewport().mapToGlobal(pos))
+
+    def _add_unsubst_action(self, menu: QMenu, path: str) -> None:
+        root = path.replace("\\", "/").rstrip("/").upper()
+        if len(root) != 2 or root[1] != ":":
+            return
+        letter = root[0]
+        target = self.drive_report.substituted_drives.get(letter)
+        if target is not None:
+            menu.addAction("Unsubst...", lambda: self._unsubst_drive(letter, target))
+
+    def _unsubst_drive(self, letter: str, target: str) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Unsubst...",
+            f"Remove the mapping {letter}: to:\n{target}\n\nDrop content as well?\n\n"
+            "Yes permanently deletes all files and subfolders in the original target folder "
+            "before removing the mapping. The target folder itself is kept.\n"
+            "No removes only the mapping. Cancel leaves everything unchanged.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.No,
+        )
+        if answer not in (QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No):
+            return
+        self._start_unsubst(letter, target, answer == QMessageBox.StandardButton.Yes)
+
+    def _start_unsubst(self, letter: str, target: str | None, delete_contents: bool) -> None:
+        if self._vfs_worker is not None or self._unsubst_worker is not None:
+            QMessageBox.information(self, "Unsubst", "Wait for the current VFS operation to finish.")
+            return
+        worker = _VfsUnmountWorker(letter, target, delete_contents)
+        label = "Deleting contents and removing mapping..." if delete_contents else "Removing mapping..."
+        progress = QProgressDialog(f"{letter}: {label}", "", 0, 0, self)
+        progress.setWindowTitle("Unsubst")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        worker.signals.completed.connect(self._on_unsubst_completed)
+        self._unsubst_worker = worker
+        self._unsubst_progress = progress
+        progress.show()
+        self._vfs_thread_pool.start(worker)
+
+    def _on_unsubst_completed(self, result: object, success: bool) -> None:
+        worker = self._unsubst_worker
+        self._unsubst_worker = None
+        if self._unsubst_progress is not None:
+            self._unsubst_progress.close()
+            self._unsubst_progress = None
+        if not success or worker is None:
+            QMessageBox.warning(self, "Unsubst failed", str(result))
+            return
+        self._vfs_drives.pop(worker.drive_letter, None)
+        self.show_this_pc()
+        self.status.showMessage(f"Removed subst drive {worker.drive_letter}:", 3000)
 
     def _add_show_hidden_action(self, menu: QMenu) -> None:
         action = menu.addAction("Show Hidden")
@@ -2627,9 +2845,9 @@ class ExplorerWindow(QMainWindow):
             QMessageBox.critical(self, "Open Terminal failed", str(error))
 
     def refresh(self) -> None:
+        self.drive_report.refresh_drives()
+        self._refresh_machine_tree()
         if self._showing_this_pc:
-            self.drive_report.refresh_drives()
-            self._refresh_machine_tree()
             self._update_status()
             return
 

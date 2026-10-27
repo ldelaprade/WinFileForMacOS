@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import sys
+from html import escape
 
 from PySide6.QtCore import Qt, QStorageInfo, Signal
 from PySide6.QtWidgets import (
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .airs_vfs.drive import DriveError, list_substituted_drives
 
 
 class DriveReportWidget(QWidget):
@@ -66,6 +69,12 @@ class DriveReportWidget(QWidget):
         return self._drive_entries.copy()
 
     def refresh_drives(self) -> None:
+        self.substituted_drives: dict[str, str] = {}
+        if sys.platform == "win32":
+            try:
+                self.substituted_drives = list_substituted_drives()
+            except (DriveError, OSError):
+                pass
         disk_image_mounts = self._disk_image_mounts()
         volumes = [
             volume
@@ -80,10 +89,19 @@ class DriveReportWidget(QWidget):
         volumes.sort(key=lambda volume: volume.rootPath().casefold())
         device_labels = self._linux_device_labels() if sys.platform.startswith("linux") else {}
 
-        self._paths = [volume.rootPath() for volume in volumes]
-        self._drive_entries = [
-            (self._volume_label(volume, device_labels), volume.rootPath()) for volume in volumes
-        ]
+        entries = {
+            volume.rootPath().replace("\\", "/").rstrip("/").casefold():
+            (self._volume_label(volume, device_labels), volume.rootPath(), volume)
+            for volume in volumes
+        }
+        for letter, target in self.substituted_drives.items():
+            root = f"{letter}:/"
+            entries[root.rstrip("/").casefold()] = (
+                f"{letter}: (subst '{target}')", root, QStorageInfo(target)
+            )
+        ordered_entries = sorted(entries.values(), key=lambda entry: entry[1].casefold())
+        self._paths = [root for _label, root, _volume in ordered_entries]
+        self._drive_entries = [(label, root) for label, root, _volume in ordered_entries]
         for row in range(self.table.rowCount()):
             for column in range(self.table.columnCount()):
                 widget = self.table.cellWidget(row, column)
@@ -92,14 +110,12 @@ class DriveReportWidget(QWidget):
                     widget.hide()
                     widget.deleteLater()
         self.table.clearContents()
-        self.table.setRowCount(len(volumes))
-        self.table.setVisible(bool(volumes))
-        self.empty_label.setVisible(not volumes)
+        self.table.setRowCount(len(ordered_entries))
+        self.table.setVisible(bool(ordered_entries))
+        self.empty_label.setVisible(not ordered_entries)
 
-        for row, volume in enumerate(volumes):
-            root_path = volume.rootPath()
-            drive_name = self._volume_label(volume, device_labels)
-            name_label = QLabel(f"<b>{drive_name}</b><br><span style='color:#666'>{root_path}</span>")
+        for row, (drive_name, root_path, volume) in enumerate(ordered_entries):
+            name_label = QLabel(f"<b>{escape(drive_name)}</b><br><span style='color:#666'>{escape(root_path)}</span>")
             name_label.setContentsMargins(8, 4, 4, 4)
             name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             name_item = QTableWidgetItem()
@@ -107,9 +123,9 @@ class DriveReportWidget(QWidget):
             self.table.setItem(row, 0, name_item)
             self.table.setCellWidget(row, 0, name_label)
 
-            total = volume.bytesTotal()
+            total = max(0, volume.bytesTotal())
             available = max(0, min(total, volume.bytesAvailable()))
-            used_percent = max(0, min(100, round((total - available) * 100 / total)))
+            used_percent = max(0, min(100, round((total - available) * 100 / total))) if total else 0
             usage = QProgressBar(self.table)
             usage.setRange(0, 100)
             usage.setValue(used_percent)

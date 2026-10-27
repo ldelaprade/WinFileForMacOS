@@ -4,7 +4,42 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from PySide6.QtWidgets import QApplication
+
 from src.drive_report import DriveReportWidget
+
+
+class SubstitutedDriveTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_subst_drives_are_added_labeled_and_not_duplicated(self):
+        volume = Mock()
+        volume.isValid.return_value = True
+        volume.isReady.return_value = True
+        volume.bytesTotal.return_value = 100
+        volume.bytesAvailable.return_value = 60
+        volume.rootPath.return_value = "S:/"
+        volume.device.return_value = b"local"
+        volume.fileSystemType.return_value = b"NTFS"
+        storage = Mock()
+        storage.mountedVolumes.return_value = [volume]
+        storage.return_value = volume
+        with patch("src.drive_report.sys.platform", "win32"), \
+                patch("src.drive_report.QStorageInfo", storage), \
+                patch("src.drive_report.list_substituted_drives",
+                      return_value={"S": r"C:\source", "T": r"C:\other"}):
+            widget = DriveReportWidget()
+            try:
+                self.assertEqual(widget.drive_entries, [
+                    (r"S: (subst 'C:\source')", "S:/"),
+                    (r"T: (subst 'C:\other')", "T:/"),
+                ])
+                self.assertEqual(widget.drive_count, 2)
+            finally:
+                widget.close()
+                widget.deleteLater()
 
 
 class LinuxVolumeVisibilityTests(unittest.TestCase):
