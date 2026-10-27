@@ -7,7 +7,6 @@
 ### On Windows
 ![Windows](windows.png)
 
-
 ### On Linux
 ![Linux](linux.png)
 
