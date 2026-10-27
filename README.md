@@ -196,7 +196,38 @@ To remove it later:
 sudo apt remove retrofile
 ```
 
-### Signed + notarized release (for sharing)
+### Windows installer
+
+Install [Inno Setup 6](https://jrsoftware.org/isdl.php) once, or use:
+
+```powershell
+winget install --id JRSoftware.InnoSetup --exact
+```
+
+Then build the executable and a minimal Windows installer:
+
+```powershell
+make release
+```
+
+This creates `dist/RetroFile-2.0.1-Setup.exe`. The installer installs for the
+current user without administrator rights, adds a Start menu shortcut, offers
+an optional desktop shortcut, and registers an uninstaller in Windows Settings.
+Python is bundled; users do not need to install it separately. Git and SVN
+remain optional external tools for their respective features.
+
+To set a release version or an explicit Inno Setup compiler path:
+
+```powershell
+make release WIN_VERSION=2.0.2
+make release ISCC="C:/Program Files (x86)/Inno Setup 6/ISCC.exe"
+```
+
+The compiler is detected on `PATH` or in standard Inno Setup 6 installation
+directories. Use `make build-windows` for just the portable executable.
+The installer is unsigned, so Windows may display a SmartScreen warning.
+
+### macOS signed + notarized release (for sharing)
 
 Requirements before running:
 1. Apple Developer ID certificate in Keychain

@@ -5,6 +5,8 @@ run:
 APP_NAME      := RetroFile
 APP_BUNDLE    := dist/$(APP_NAME).app
 DEB_VERSION   ?= 2.0.1
+WIN_VERSION   ?= $(DEB_VERSION)
+ISCC          ?= ISCC.exe
 ifeq ($(OS),Windows_NT)
 DEB_ARCH      ?= amd64
 else
@@ -35,7 +37,7 @@ DEV_ID        ?= Developer ID Application: Your Name (TEAMID)
 PROFILE       ?= notarytool-profile
 BUNDLE_ID     ?= com.yourname.explorer
 
-.PHONY: all build unsigned-dmg build-debug trace-debug release dmg notarize staple build-linux build-deb build-windows clean clean-all
+.PHONY: all build unsigned-dmg build-debug trace-debug release dmg notarize staple build-linux build-deb build-windows build-windows-installer clean clean-all
 
 all: build
 
@@ -142,6 +144,12 @@ build-windows:
 	@echo "Built Windows executable: dist/$(APP_NAME).exe"
 	@echo "Run: dist/$(APP_NAME).exe"
 
+ifeq ($(HOST_OS),Windows)
+build-windows-installer: build-windows
+	powershell.exe -NoProfile -File tools/build_windows_installer.ps1 -AppName "$(APP_NAME)" -Version "$(WIN_VERSION)" -CompilerPath "$(ISCC)"
+
+release: build-windows-installer
+else
 # ── Signed release build ─────────────────────────────────────────────────────
 # Prerequisites:
 #   1. Apple Developer ID certificate in Keychain
@@ -150,6 +158,7 @@ build-windows:
 
 release: build sign dmg notarize staple
 	@echo "✓ Signed, notarized and stapled: $(DMG_NAME)"
+endif
 
 sign:
 	codesign --deep --force --options runtime \
