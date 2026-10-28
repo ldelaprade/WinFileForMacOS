@@ -4,7 +4,7 @@ run:
 # ── Configuration ────────────────────────────────────────────────────────────
 APP_NAME      := RetroFile
 APP_BUNDLE    := dist/$(APP_NAME).app
-DEB_VERSION   ?= 2.0.1
+DEB_VERSION   ?= 2.0.3
 WIN_VERSION   ?= $(DEB_VERSION)
 ISCC          ?= ISCC.exe
 ifeq ($(OS),Windows_NT)
@@ -149,6 +149,8 @@ build-windows-installer: build-windows
 	powershell.exe -NoProfile -File tools/build_windows_installer.ps1 -AppName "$(APP_NAME)" -Version "$(WIN_VERSION)" -CompilerPath "$(ISCC)"
 
 release: build-windows-installer
+else ifeq ($(HOST_OS),Linux)
+release: build-deb
 else
 # ── Signed release build ─────────────────────────────────────────────────────
 # Prerequisites:

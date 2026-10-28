@@ -191,18 +191,22 @@ You can also set `PYTHON` to a supported virtual environment's interpreter path.
 
 ### Ubuntu/Debian installer
 
-On Ubuntu or another Debian-based Linux distribution, build a native `.deb` package:
+On Ubuntu or another Debian-based Linux distribution, `make release` builds a
+minimal native `.deb` installer. It includes the self-contained application,
+desktop launcher, and application icons:
 
 ```bash
-make build-deb
-sudo apt install ./dist/RetroFile_2.0.0_amd64.deb
+make release
+sudo apt install ./dist/RetroFile_2.0.1_amd64.deb
 ```
 
 The package installs the application under `/opt/RetroFile` and adds **RetroFile** to the desktop application menu. Set a different package version when needed:
 
 ```bash
-make build-deb DEB_VERSION=1.1.0
+make release DEB_VERSION=1.1.0
 ```
+
+`make build-deb` remains available to build the package directly.
 
 To remove it later:
 
