@@ -4,13 +4,70 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtCore import QPoint, QSettings, Qt
+from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QListWidget, QListWidgetItem, QMenu, QMessageBox, QTreeView,
+)
 
 from src.airs_vfs.drive import DriveError
+from src.dialogs import CustomToolsDialog
 from src.file_explorer import ExplorerWindow, _VfsUnmountWorker
 
 
 class FileExplorerOpenTests(unittest.TestCase):
+    def test_custom_tool_passes_target_as_one_argument(self):
+        for target in ("/work/current folder", "/work/file name;echo.txt"):
+            with self.subTest(target=target):
+                with patch("src.file_explorer.subprocess.Popen") as popen:
+                    ExplorerWindow._run_custom_tool(
+                        MagicMock(), '"/Applications/My Tool/bin/tool" --mode "read only"',
+                        target, "/work",
+                    )
+                self.assertEqual(popen.call_args.args[0], [
+                    "/Applications/My Tool/bin/tool", "--mode", "read only", target,
+                ])
+                self.assertEqual(popen.call_args.kwargs["cwd"], "/work")
+                self.assertNotIn("shell", popen.call_args.kwargs)
+
+    def test_custom_tool_reports_invalid_or_missing_command(self):
+        for command, error in (("", None), ("missing-tool", FileNotFoundError("not found"))):
+            with self.subTest(command=command):
+                with patch("src.file_explorer.subprocess.Popen", side_effect=error), \
+                        patch("src.file_explorer.QMessageBox.warning") as warning:
+                    ExplorerWindow._run_custom_tool(MagicMock(), command, "/work", "/work")
+                warning.assert_called_once()
+
+    def test_custom_tool_reports_unclosed_posix_quote(self):
+        with patch("src.file_explorer.sys.platform", "darwin"), \
+                patch("src.file_explorer.subprocess.Popen") as popen, \
+                patch("src.file_explorer.QMessageBox.warning") as warning:
+            ExplorerWindow._run_custom_tool(MagicMock(), '"unclosed', "/work", "/work")
+        popen.assert_not_called()
+        warning.assert_called_once()
+
+    def test_custom_tool_preserves_windows_paths(self):
+        with patch("src.file_explorer.sys.platform", "win32"), \
+                patch("src.file_explorer.subprocess.Popen") as popen:
+            ExplorerWindow._run_custom_tool(
+                MagicMock(), r'"C:\Program Files\Editor\editor.exe" --reuse-window',
+                r"C:\Work\file name.txt", r"C:\Work",
+            )
+        self.assertEqual(popen.call_args.args[0], [
+            r"C:\Program Files\Editor\editor.exe", "--reuse-window", r"C:\Work\file name.txt",
+        ])
+
+    def test_custom_tools_settings_ignore_invalid_entries(self):
+        window = MagicMock()
+        for stored, expected in (
+            ('[{"name":"Editor","command":"code"}]', [{"name": "Editor", "command": "code"}]),
+            ('[{"name":"Broken"}, null, {"name":1,"command":"code"}]', []),
+            ('{"name":"wrong shape"}', []), ("invalid json", []),
+        ):
+            with self.subTest(stored=stored):
+                window._settings.value.return_value = stored
+                self.assertEqual(ExplorerWindow._custom_tools(window), expected)
+
     def test_unsubst_confirmation_choices(self):
         for answer in (QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No,
                        QMessageBox.StandardButton.Cancel):
@@ -200,6 +257,105 @@ class FileExplorerOpenTests(unittest.TestCase):
             registry.OpenKey.return_value.__enter__.return_value,
             "{374DE290-123F-4565-9164-39C4925E467B}",
         )
+
+
+class CustomToolsUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_dialog_add_edit_remove_and_validate(self):
+        dialog = CustomToolsDialog([{"name": "Editor", "command": "code"}])
+        self.addCleanup(dialog.close)
+        self.assertEqual(dialog.table.columnCount(), 2)
+        dialog._add_row("Viewer", "open")
+        dialog.table.item(0, 1).setText("code --reuse-window")
+        dialog.table.selectRow(1)
+        dialog._remove_rows()
+        self.assertEqual(dialog.tools(), [{"name": "Editor", "command": "code --reuse-window"}])
+        dialog._add_row("Incomplete", "")
+        with patch("src.dialogs.QMessageBox.warning") as warning:
+            dialog.accept()
+        warning.assert_called_once()
+        self.assertNotEqual(dialog.result(), QDialog.Accepted)
+        dialog.table.item(1, 1).setText("viewer")
+        dialog.accept()
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+
+    def test_menu_lists_tools_above_configure_and_captures_target(self):
+        window = MagicMock()
+        window._showing_this_pc = False
+        window.current_path.return_value = "/current"
+        window._custom_tools.return_value = [
+            {"name": "Editor", "command": "code"}, {"name": "Viewer", "command": "open"},
+        ]
+        menu = QMenu()
+        ExplorerWindow._add_custom_tools_menu(window, menu, "/current/my file.txt")
+        more = menu.actions()[0].menu()
+        self.assertEqual(more.title(), "More...")
+        self.assertEqual([action.text() for action in more.actions()],
+                         ["Editor", "Viewer", "", "Configure..."])
+        for action, command in zip(more.actions(), ("code", "open")):
+            action.trigger()
+            window._run_custom_tool.assert_called_with(command, "/current/my file.txt", "/current")
+        more.actions()[-1].trigger()
+        window._configure_custom_tools.assert_called_once()
+
+    def test_context_target_uses_clicked_item_or_current_folder_in_both_views(self):
+        for thumbnails in (False, True):
+            with self.subTest(thumbnails=thumbnails):
+                window = MagicMock()
+                window.current_path.return_value = "/current"
+                paths = ["/current/folder", "/current/file name.txt"]
+                if thumbnails:
+                    view = QListWidget()
+                    for path in paths:
+                        item = QListWidgetItem(path, view)
+                        item.setData(Qt.ItemDataRole.UserRole, path)
+                    view.setCurrentRow(0)
+                else:
+                    view = QTreeView()
+                    model = QStandardItemModel()
+                    for path in paths:
+                        model.appendRow(QStandardItem(path))
+                    view.setModel(model)
+                    view.setCurrentIndex(model.index(0, 0))
+                    window.fs_model.filePath.side_effect = lambda index: paths[index.row()]
+                view.resize(500, 300)
+                view.show()
+                self.app.processEvents()
+                window.sender.return_value = view
+                for row, expected in ((0, paths[0]), (1, paths[1]), (None, "/current")):
+                    if row is None:
+                        pos = QPoint(10, view.viewport().height() - 10)
+                    elif thumbnails:
+                        pos = view.visualItemRect(view.item(row)).center()
+                    else:
+                        pos = view.visualRect(model.index(row, 0)).center()
+                    with patch("src.file_explorer.QMenu"):
+                        ExplorerWindow._show_context_menu(window, pos)
+                    self.assertEqual(window._add_custom_tools_menu.call_args.args[1], expected)
+                view.close()
+
+    def test_configure_persists_tools_and_cancel_leaves_them_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = str(Path(directory) / "settings.ini")
+            window = MagicMock()
+            window._settings = QSettings(settings_path, QSettings.Format.IniFormat)
+            tools = [{"name": "Editor", "command": "code"}]
+            with patch("src.file_explorer.CustomToolsDialog") as dialog_class:
+                dialog = dialog_class.return_value
+                dialog.exec.return_value = QDialog.Accepted
+                dialog.tools.return_value = tools
+                ExplorerWindow._configure_custom_tools(window)
+                window._settings.sync()
+                restored = MagicMock()
+                restored._settings = QSettings(settings_path, QSettings.Format.IniFormat)
+                self.assertEqual(ExplorerWindow._custom_tools(restored), tools)
+                dialog.exec.return_value = QDialog.Rejected
+                dialog.tools.return_value = []
+                ExplorerWindow._configure_custom_tools(window)
+                self.assertEqual(ExplorerWindow._custom_tools(window), tools)
 
 
 if __name__ == "__main__":

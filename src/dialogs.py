@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,12 +26,70 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QSpinBox,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
 )
 
 if TYPE_CHECKING:
     from .git_operations import GitBranchInfo, GitChanges
     from .svn_operations import SvnChanges
+
+
+class CustomToolsDialog(QDialog):
+    def __init__(self, tools: list[dict[str, str]], parent: QMainWindow | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Configure Tools")
+        self.resize(720, 400)
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(0, 2, self)
+        self.table.setHorizontalHeaderLabels(["Name", "Command"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        for tool in tools:
+            self._add_row(tool["name"], tool["command"])
+        layout.addWidget(self.table)
+        controls = QHBoxLayout()
+        add_button = QPushButton("Add", self)
+        add_button.clicked.connect(lambda: self._add_row())
+        remove_button = QPushButton("Remove", self)
+        remove_button.clicked.connect(self._remove_rows)
+        controls.addWidget(add_button)
+        controls.addWidget(remove_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _add_row(self, name: str = "", command: str = "") -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(name))
+        self.table.setItem(row, 1, QTableWidgetItem(command))
+        self.table.setCurrentCell(row, 0)
+
+    def _remove_rows(self) -> None:
+        rows = {index.row() for index in self.table.selectedIndexes()}
+        for row in sorted(rows, reverse=True):
+            self.table.removeRow(row)
+
+    def tools(self) -> list[dict[str, str]]:
+        return [
+            {"name": self.table.item(row, 0).text().strip(),
+             "command": self.table.item(row, 1).text().strip()}
+            for row in range(self.table.rowCount())
+            if self.table.item(row, 0).text().strip() or self.table.item(row, 1).text().strip()
+        ]
+
+    def accept(self) -> None:
+        if any(not tool["name"] or not tool["command"] for tool in self.tools()):
+            QMessageBox.warning(self, "Configure Tools", "Each tool needs a name and a command.")
+            return
+        super().accept()
 
 
 class GitStagingDialog(QDialog):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+import shlex
 import shutil
 import sys
 import threading
@@ -23,6 +25,7 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     QPointF,
+    QProcess,
     QRectF,
     QRunnable,
     QSize,
@@ -83,6 +86,7 @@ from PySide6.QtWidgets import (
 
 from .dialogs import (
     ActionConfirmDialog,
+    CustomToolsDialog,
     DeleteConfirmDialog,
     SshLocationDialog,
     FtpLocationDialog,
@@ -1143,15 +1147,74 @@ class ExplorerWindow(QMainWindow):
         menu.addSeparator()
         self._add_git_menu(menu)
         self._add_svn_menu(menu)
+        source = self.sender()
+        target = self.current_path()
+        if isinstance(source, QTreeView):
+            index = source.indexAt(pos)
+            if index.isValid():
+                target = self.fs_model.filePath(index)
+        elif isinstance(source, QListWidget):
+            item = source.itemAt(pos)
+            if item is not None:
+                target = item.data(Qt.ItemDataRole.UserRole) or target
+        self._add_custom_tools_menu(menu, target)
         self._add_vfs_actions(menu)
         menu.addSeparator()
         self._add_show_hidden_action(menu)
-        source = self.sender()
         if isinstance(source, (QTreeView, QListWidget)):
             global_pos = source.viewport().mapToGlobal(pos)
         else:
             global_pos = self.mapToGlobal(pos)
         menu.exec(global_pos)
+
+    def _custom_tools(self) -> list[dict[str, str]]:
+        try:
+            tools = json.loads(self._settings.value("tools/commands", "[]"))
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(tools, list):
+            return []
+        return [
+            {"name": tool["name"], "command": tool["command"]}
+            for tool in tools
+            if isinstance(tool, dict)
+            and isinstance(tool.get("name"), str) and tool["name"].strip()
+            and isinstance(tool.get("command"), str) and tool["command"].strip()
+        ]
+
+    def _add_custom_tools_menu(self, menu: QMenu, target: str) -> None:
+        more_menu = QMenu("More...", menu)
+        menu.addMenu(more_menu)
+        directory = self.current_path()
+        for tool in self._custom_tools():
+            action = more_menu.addAction(
+                tool["name"],
+                lambda checked=False, command=tool["command"]: self._run_custom_tool(
+                    command, target, directory
+                ),
+            )
+            action.setEnabled(not self._showing_this_pc)
+        if more_menu.actions():
+            more_menu.addSeparator()
+        more_menu.addAction("Configure...", self._configure_custom_tools)
+
+    def _configure_custom_tools(self) -> None:
+        dialog = CustomToolsDialog(self._custom_tools(), self)
+        if dialog.exec() == QDialog.Accepted:
+            self._settings.setValue("tools/commands", json.dumps(dialog.tools()))
+
+    def _run_custom_tool(self, command: str, target: str, directory: str) -> None:
+        try:
+            arguments = QProcess.splitCommand(command) if sys.platform == "win32" else shlex.split(command)
+            if not arguments:
+                raise ValueError("The command is empty.")
+            arguments[0] = os.path.expanduser(arguments[0])
+            subprocess.Popen(
+                [*arguments, target], cwd=directory,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Tool Launch Failed", f"Could not start the tool:\n{error}")
 
     def _vfs_candidate_folder(self) -> str | None:
         if self._showing_this_pc:

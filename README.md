@@ -33,6 +33,7 @@ A classic Windows-inspired file manager for macOS, Windows, and Linux, built wit
 - Favorites can be re-ordered by drag-and-drop
 - Git context menu: repository cloning and status, stage/unstage selected items, staged diffs, commits, and repository initialization
 - SVN context menu: working-copy status, diffs, add selected items, commit selected items, and update
+- Custom tools under **More...** in the right-pane context menu, with persistent name/command configuration
 - Windows subst drives appear under Local Machine and Drives with their target paths. Right-click a mapped drive and choose **Unsubst...** to remove it. Answering **Yes** to **Drop content as well?** permanently deletes the original target folder's contents before unmapping; **No** preserves them, and **Cancel** makes no changes.
 
 ## Requirements
@@ -62,6 +63,19 @@ python -m src.main
 - Add a bookmark by dragging a folder from *File System* or *Network* into *Favorites*.
 - Right-click a folder in *File System* or *Network* and choose **Add to Favorites**.
 - On first launch, *Favorites* is pre-populated with Home, Desktop, and Downloads (if they exist).
+
+## Custom Tools
+
+Right-click the right pane and choose **More... > Configure...**. Add, edit, or
+remove rows in the **Name** and **Command** columns, then choose **OK** to save.
+Saved tools appear above **Configure...** and remain available across launches.
+
+Commands contain an executable and optional arguments, such as `code --reuse-window`
+or `open -a "TextEdit"` on macOS. Quote executable paths or arguments containing
+spaces. The full path of the right-clicked file or folder is appended as one
+argument. Right-clicking blank space passes the current folder instead, even if
+an item is selected. The working directory is the folder displayed in the right
+pane. Commands run directly, without shell expansion, pipes, or redirection.
 
 ## Git Integration
 
