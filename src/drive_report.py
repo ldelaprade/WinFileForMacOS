@@ -78,7 +78,7 @@ class DriveReportWidget(QWidget):
         disk_image_mounts = self._disk_image_mounts()
         volumes = [
             volume
-            for volume in QStorageInfo.mountedVolumes()
+            for volume in self._mounted_volumes()
             if volume.isValid()
             and volume.isReady()
             and volume.bytesTotal() > 0
@@ -160,6 +160,27 @@ class DriveReportWidget(QWidget):
     def _activate_row(self, row: int, _column: int) -> None:
         if 0 <= row < len(self._paths):
             self.drive_activated.emit(self._paths[row])
+
+    @staticmethod
+    def _mounted_volumes() -> list[QStorageInfo]:
+        if os.name != "nt":
+            return QStorageInfo.mountedVolumes()
+        import ctypes
+
+        # Querying volume info on unreachable mapped network drives blocks for SMB timeouts.
+        drive_remote = 4
+        drive_no_root_dir = 1
+        kernel32 = ctypes.windll.kernel32
+        mask = kernel32.GetLogicalDrives()
+        volumes: list[QStorageInfo] = []
+        for index in range(26):
+            if not mask & (1 << index):
+                continue
+            root = f"{chr(ord('A') + index)}:\\"
+            if kernel32.GetDriveTypeW(root) in (drive_remote, drive_no_root_dir):
+                continue
+            volumes.append(QStorageInfo(root))
+        return volumes
 
     @staticmethod
     def _is_user_visible_volume(

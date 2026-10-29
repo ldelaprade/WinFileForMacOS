@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 from urllib.parse import unquote, urlparse
 
-from PySide6.QtCore import QMimeData, QSettings, QStorageInfo, Qt, QUrl, Signal
+from PySide6.QtCore import QMimeData, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWidgetItem, QWidget, QFileIconProvider
 
@@ -16,6 +18,59 @@ from .ftp_mount import active_windows_ftp_mounts, is_windows_ftp_mount, unmount_
 
 
 _WINDOWS_KNOWN_SHARES_KEY = "network/known_windows_shares"
+NETWORK_PROBE_TIMEOUT_MS = 3000
+_UNREACHABLE_SECONDS = 30.0
+_unreachable_until: dict[str, float] = {}
+_posix_network_mounts: list[str] = []
+
+
+def is_network_path(path: str) -> bool:
+    """True for UNC paths, mapped network drives and known network mounts (no I/O on the share)."""
+    if not path:
+        return False
+    if os.name == "nt":
+        if path.startswith(("\\\\", "//")):
+            return True
+        drive = os.path.splitdrive(path)[0]
+        if len(drive) != 2 or drive[1] != ":":
+            return False
+        import ctypes
+
+        return ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\") == 4  # DRIVE_REMOTE
+    return network_root(path) is not None
+
+
+def network_root(path: str) -> str | None:
+    """Share identity used to remember unreachable locations."""
+    if os.name == "nt":
+        normalized = path.replace("/", "\\")
+        if normalized.startswith("\\\\"):
+            parts = [segment for segment in normalized.split("\\") if segment]
+            return ("\\\\" + "\\".join(parts[:2])).lower() if parts else None
+        drive = os.path.splitdrive(normalized)[0]
+        return drive.upper() or None
+    absolute = os.path.abspath(path)
+    for mount in _posix_network_mounts:
+        if absolute == mount or absolute.startswith(mount.rstrip("/") + "/"):
+            return mount
+    return None
+
+
+def mark_unreachable(path: str) -> None:
+    root = network_root(path)
+    if root:
+        _unreachable_until[root] = time.monotonic() + _UNREACHABLE_SECONDS
+
+
+def clear_unreachable(path: str) -> None:
+    root = network_root(path)
+    if root:
+        _unreachable_until.pop(root, None)
+
+
+def is_marked_unreachable(path: str) -> bool:
+    root = network_root(path)
+    return bool(root) and _unreachable_until.get(root, 0.0) > time.monotonic()
 
 
 def get_mounted_network_shares() -> list[tuple[str, str, str]]:
@@ -48,6 +103,7 @@ def get_mounted_network_shares() -> list[tuple[str, str, str]]:
         source_url = _mounted_source_to_url(source.strip(), lower)
         display = _network_share_display_name(mount_path, source_url)
         shares.append((display, mount_path, source_url))
+    _posix_network_mounts[:] = [os.path.abspath(mount) for _d, mount, _s in shares]
     return shares
 
 
@@ -97,17 +153,14 @@ def _get_windows_network_shares() -> list[tuple[str, str, str]]:
         shares.append((display, mount_path, source_url))
         seen_paths.add(mount_path.lower())
 
-    for volume in QStorageInfo.mountedVolumes():
-        remote_path = bytes(volume.device()).decode("utf-8", errors="replace").rstrip("\\")
-        if not remote_path.startswith("\\\\") or remote_path.startswith("\\\\?\\"):
-            continue
+    for root_path, remote_path in _windows_mapped_network_drives():
         normalized = remote_path.lower()
         if normalized in seen_paths:
             continue
         seen_paths.add(normalized)
         parts = [segment for segment in remote_path.split("\\") if segment]
         display = parts[1] if len(parts) >= 2 else remote_path
-        shares.append((display, volume.rootPath(), remote_path))
+        shares.append((display, root_path, remote_path))
 
     try:
         result = subprocess.run(
@@ -154,6 +207,36 @@ def _get_windows_network_shares() -> list[tuple[str, str, str]]:
         shares.append((display, mount_path, remote_path))
 
     return shares
+
+
+def _windows_mapped_network_drives() -> list[tuple[str, str]]:
+    """Return (root_path, unc) for mapped drive letters without contacting the servers."""
+    import ctypes
+
+    drive_remote = 4
+    error_connection_unavail = 1201
+    kernel32 = ctypes.windll.kernel32
+    try:
+        mpr = ctypes.windll.mpr
+    except OSError:
+        return []
+    mask = kernel32.GetLogicalDrives()
+    drives: list[tuple[str, str]] = []
+    for index in range(26):
+        if not mask & (1 << index):
+            continue
+        letter = chr(ord("A") + index)
+        if kernel32.GetDriveTypeW(f"{letter}:\\") != drive_remote:
+            continue
+        buffer = ctypes.create_unicode_buffer(1024)
+        length = ctypes.c_ulong(len(buffer))
+        result = mpr.WNetGetConnectionW(f"{letter}:", buffer, ctypes.byref(length))
+        if result not in (0, error_connection_unavail):
+            continue
+        remote_path = buffer.value.rstrip("\\")
+        if remote_path.startswith("\\\\") and not remote_path.startswith("\\\\?\\"):
+            drives.append((f"{letter}:/", remote_path))
+    return drives
 
 
 def _mounted_source_to_url(source: str, lower_mount_line: str) -> str:
@@ -313,6 +396,8 @@ class NetworkPanel(QTreeWidget):
     navigate_requested: Signal = Signal(str)
     edit_connection_requested: Signal = Signal(str, str)
     add_to_favorites_requested: Signal = Signal(str)
+    _children_listed: Signal = Signal(str, object)
+    _shares_listed: Signal = Signal(int, object)
     _PATH_ROLE = Qt.UserRole
     _IS_SHARE_ROLE = Qt.UserRole + 1
     _LOADED_ROLE = Qt.UserRole + 2
@@ -335,6 +420,8 @@ class NetworkPanel(QTreeWidget):
         self._network_root_icon = style.standardIcon(QStyle.SP_DriveNetIcon)
         icon_provider = XPIconProvider()
         self._folder_icon = icon_provider.icon(QFileIconProvider.Folder)
+        self._pending_expansions: dict[str, QTreeWidgetItem] = {}
+        self._children_listed.connect(self._on_children_listed)
 
         self.setHeaderHidden(True)
         self.setRootIsDecorated(True)
@@ -345,13 +432,31 @@ class NetworkPanel(QTreeWidget):
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.itemClicked.connect(self._on_item_clicked)
         self.itemExpanded.connect(self._on_item_expanded)
+        self._refresh_token = 0
+        self._shares_listed.connect(self._on_shares_listed)
 
         self.refresh_shares()
 
     def refresh_shares(self) -> None:
-        """Re-scan mounted network shares and repopulate the tree."""
+        """Re-scan mounted network shares in the background and repopulate the tree."""
+        self._refresh_token += 1
+        token = self._refresh_token
+
+        def enumerate_shares() -> None:
+            try:
+                shares = list(get_mounted_network_shares())
+            except Exception:
+                shares = []
+            self._shares_listed.emit(token, shares)
+
+        # Querying mapped drives can block when the redirector is unhappy.
+        threading.Thread(target=enumerate_shares, daemon=True).start()
+
+    def _on_shares_listed(self, token: int, shares: list[tuple[str, str, str]]) -> None:
+        if token != self._refresh_token:
+            return
+        self._pending_expansions.clear()
         self.clear()
-        shares = list(get_mounted_network_shares())
         if os.name == "nt":
             shares.extend(self._known_windows_share_entries())
 
@@ -372,8 +477,8 @@ class NetworkPanel(QTreeWidget):
             item.setData(0, self._SOURCE_URL_ROLE, source_url)
             item.setIcon(0, self._network_root_icon)
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            if self._has_subdirectories(mount_path):
-                self._add_placeholder_child(item)
+            # Shares are only accessed on demand (expand/click), never while listing.
+            self._add_placeholder_child(item)
 
     def _on_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         path = item.data(0, self._PATH_ROLE)
@@ -390,11 +495,65 @@ class NetworkPanel(QTreeWidget):
 
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
         path = item.data(0, self._PATH_ROLE)
-        if not path:
+        if not path or item.data(0, self._LOADED_ROLE) or path in self._pending_expansions:
             return
-        if item.data(0, self._LOADED_ROLE):
+        item.takeChildren()
+        if is_marked_unreachable(path):
+            self._set_status_child(item, "Not reachable")
             return
-        self._populate_children(item, path)
+        self._set_status_child(item, "Loading...")
+        self._pending_expansions[path] = item
+        threading.Thread(target=self._list_children, args=(path,), daemon=True).start()
+        QTimer.singleShot(NETWORK_PROBE_TIMEOUT_MS, lambda p=path: self._on_expansion_timeout(p))
+
+    def _list_children(self, path: str) -> None:
+        try:
+            with os.scandir(path) as entries:
+                names = sorted(
+                    (
+                        entry.name
+                        for entry in entries
+                        if entry.is_dir(follow_symlinks=False) and not entry.name.startswith(".")
+                    ),
+                    key=str.lower,
+                )
+        except OSError:
+            names = None
+        self._children_listed.emit(path, names)
+
+    def _on_expansion_timeout(self, path: str) -> None:
+        item = self._pending_expansions.pop(path, None)
+        if item is None:
+            return
+        mark_unreachable(path)
+        item.takeChildren()
+        self._set_status_child(item, "Not reachable")
+
+    def _on_children_listed(self, path: str, names: list[str] | None) -> None:
+        item = self._pending_expansions.pop(path, None)
+        if item is None:
+            return
+        item.takeChildren()
+        if names is None:
+            mark_unreachable(path)
+            self._set_status_child(item, "Not reachable")
+            return
+        clear_unreachable(path)
+        for name in names:
+            child = QTreeWidgetItem(item, [name])
+            child.setData(0, self._PATH_ROLE, os.path.join(path, name))
+            child.setData(0, self._IS_SHARE_ROLE, False)
+            child.setData(0, self._LOADED_ROLE, False)
+            child.setIcon(0, self._folder_icon)
+            child.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self._add_placeholder_child(child)
+        item.setData(0, self._LOADED_ROLE, True)
+
+    @staticmethod
+    def _set_status_child(parent: QTreeWidgetItem, text: str) -> None:
+        status = QTreeWidgetItem(parent, [text])
+        status.setData(0, Qt.UserRole, "__placeholder__")
+        status.setFlags(Qt.NoItemFlags)
 
     def _on_context_menu(self, pos) -> None:
         item = self.itemAt(pos)
@@ -443,7 +602,7 @@ class NetworkPanel(QTreeWidget):
             path = item.data(0, self._PATH_ROLE)
             if not isinstance(path, str) or not path:
                 continue
-            if not os.path.exists(path):
+            if not is_network_path(path) and not os.path.exists(path):
                 continue
             urls.append(QUrl.fromLocalFile(path))
 
@@ -480,21 +639,13 @@ class NetworkPanel(QTreeWidget):
 
     def _known_windows_share_entries(self) -> list[tuple[str, str, str]]:
         entries: list[tuple[str, str, str]] = []
-        reachable: list[str] = []
         for known_share in self._known_windows_shares:
             normalized = normalize_network_share_input(known_share)
             if not normalized.startswith("\\\\"):
                 continue
-            # Keep shortcuts useful by showing currently reachable shares.
-            if not os.path.isdir(normalized):
-                continue
             parts = [segment for segment in normalized.split("\\") if segment]
             display = parts[1] if len(parts) >= 2 else normalized
             entries.append((display, normalized, normalized))
-            reachable.append(normalized)
-        if reachable != self._known_windows_shares:
-            self._known_windows_shares = reachable
-            self._save_known_windows_shares()
         return entries
 
     def _load_known_windows_shares(self) -> list[str]:
@@ -526,45 +677,7 @@ class NetworkPanel(QTreeWidget):
         self._settings.setValue(_WINDOWS_KNOWN_SHARES_KEY, self._known_windows_shares)
 
     @staticmethod
-    def _has_subdirectories(path: str) -> bool:
-        try:
-            for entry in os.scandir(path):
-                if entry.is_dir(follow_symlinks=False) and not entry.name.startswith('.'):
-                    return True
-        except OSError:
-            return False
-        return False
-
-    @staticmethod
     def _add_placeholder_child(parent: QTreeWidgetItem) -> None:
         placeholder = QTreeWidgetItem(parent, [""])
         placeholder.setData(0, Qt.UserRole, "__placeholder__")
         placeholder.setFlags(Qt.NoItemFlags)
-
-    def _populate_children(self, parent: QTreeWidgetItem, parent_path: str) -> None:
-        parent.takeChildren()
-        try:
-            dir_entries = sorted(
-                (
-                    entry
-                    for entry in os.scandir(parent_path)
-                    if entry.is_dir(follow_symlinks=False) and not entry.name.startswith('.')
-                ),
-                key=lambda e: e.name.lower(),
-            )
-        except OSError:
-            parent.setData(0, self._LOADED_ROLE, True)
-            return
-
-        for entry in dir_entries:
-            child_path = entry.path
-            child = QTreeWidgetItem(parent, [entry.name])
-            child.setData(0, self._PATH_ROLE, child_path)
-            child.setData(0, self._IS_SHARE_ROLE, False)
-            child.setData(0, self._LOADED_ROLE, False)
-            child.setIcon(0, self._folder_icon)
-            child.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            if self._has_subdirectories(child_path):
-                self._add_placeholder_child(child)
-
-        parent.setData(0, self._LOADED_ROLE, True)

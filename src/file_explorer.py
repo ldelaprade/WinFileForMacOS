@@ -20,6 +20,7 @@ from PySide6.QtCore import (
     QDir,
     QEvent,
     QFileInfo,
+    QFileSystemWatcher,
     QLockFile,
     QModelIndex,
     QObject,
@@ -109,7 +110,12 @@ from .dragdrop_views import (
     MachineTreeWidget,
 )
 from .network_panel import (
+    NETWORK_PROBE_TIMEOUT_MS,
     NetworkPanel,
+    clear_unreachable,
+    is_marked_unreachable,
+    is_network_path,
+    mark_unreachable,
     mount_smb_share,
     normalize_network_share_input,
     resolve_smb_mount_paths,
@@ -302,6 +308,7 @@ class ExplorerWindow(QMainWindow):
     _TRASH_MODE_SETTINGS_KEY = "behavior/use_system_trash"
     _THIS_PC_HISTORY_ENTRY = "retrofile://this-pc"
     _MACHINE_TREE_CHILDREN_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
+    _network_probe_done = Signal(int, str, bool, bool)
 
     def __init__(
         self,
@@ -380,6 +387,8 @@ class ExplorerWindow(QMainWindow):
         self._pending_navigation_timer = QTimer(self)
         self._pending_navigation_timer.setSingleShot(True)
         self._pending_navigation_timer.timeout.connect(self._apply_pending_navigation)
+        self._network_probe_token = 0
+        self._network_probe_done.connect(self._on_network_probe_done)
 
         self.new_window_action = QAction("New Window", self)
         self.new_window_action.setShortcut(QKeySequence.StandardKey.New)
@@ -396,7 +405,13 @@ class ExplorerWindow(QMainWindow):
         self._setup_statusbar()
         self._setup_shortcuts()
 
-        start_path = initial_path if initial_path and os.path.isdir(initial_path) else str(Path.home())
+        main_disk_root = os.environ.get("SystemDrive", "C:") + "\\" if os.name == "nt" else "/"
+        if initial_path and is_network_path(initial_path):
+            # Show a local folder while the network location is probed.
+            self.navigate_to(main_disk_root, record_history=False)
+            self.navigate_to(initial_path, record_history=True)
+            return
+        start_path = initial_path if initial_path and os.path.isdir(initial_path) else main_disk_root
         self.navigate_to(start_path, record_history=True)
 
     def _setup_models(self) -> None:
@@ -413,6 +428,16 @@ class ExplorerWindow(QMainWindow):
             | QDir.Hidden
         )
         self.fs_model.setIconProvider(icon_provider)
+        self._dir_watcher: QFileSystemWatcher | None = None
+        if os.name == "nt":
+            # Qt's watcher re-reads every drive on drive arrival; an unreachable share then stalls all listings.
+            self.fs_model.setOption(QFileSystemModel.Option.DontWatchForChanges, True)
+            self._dir_watcher = QFileSystemWatcher(self)
+            self._dir_change_timer = QTimer(self)
+            self._dir_change_timer.setSingleShot(True)
+            self._dir_change_timer.setInterval(300)
+            self._dir_change_timer.timeout.connect(self._rescan_current_directory)
+            self._dir_watcher.directoryChanged.connect(lambda _path: self._dir_change_timer.start())
         self.fs_model.setRootPath(str(Path.home()))
         self.fs_model.directoryLoaded.connect(self._on_directory_loaded)
 
@@ -2045,6 +2070,58 @@ class ExplorerWindow(QMainWindow):
             return
 
         normalized = os.path.abspath(os.path.expanduser(path))
+        if is_network_path(normalized):
+            self._probe_network_path(normalized, record_history)
+            return
+        self._navigate_now(normalized, record_history)
+
+    def _probe_network_path(self, path: str, record_history: bool) -> None:
+        """Check a network folder off the UI thread so a dead share cannot freeze the window."""
+        self._network_probe_token += 1
+        token = self._network_probe_token
+        if is_marked_unreachable(path):
+            self._report_unreachable(path)
+            return
+        self.status.showMessage(f"Connecting to {path}...")
+
+        def probe() -> None:
+            try:
+                reachable = os.path.isdir(path)
+            except OSError:
+                reachable = False
+            self._network_probe_done.emit(token, path, record_history, reachable)
+
+        threading.Thread(target=probe, daemon=True).start()
+        QTimer.singleShot(NETWORK_PROBE_TIMEOUT_MS, lambda: self._on_network_probe_timeout(token, path))
+
+    def _on_network_probe_done(self, token: int, path: str, record_history: bool, reachable: bool) -> None:
+        if token != self._network_probe_token:
+            return
+        self._network_probe_token += 1
+        self.status.clearMessage()
+        if not reachable:
+            mark_unreachable(path)
+            self._report_unreachable(path)
+            return
+        clear_unreachable(path)
+        self._navigate_now(path, record_history)
+
+    def _on_network_probe_timeout(self, token: int, path: str) -> None:
+        if token != self._network_probe_token:
+            return
+        self._network_probe_token += 1
+        mark_unreachable(path)
+        self._report_unreachable(path)
+
+    def _report_unreachable(self, path: str) -> None:
+        self.status.showMessage(f"Network location not reachable: {path}", 6000)
+        QMessageBox.warning(
+            self,
+            "Network location not reachable",
+            f"Could not reach:\n{path}\n\nCheck the connection and try again.",
+        )
+
+    def _navigate_now(self, normalized: str, record_history: bool) -> None:
         if self._is_app_bundle(normalized):
             QDesktopServices.openUrl(QUrl.fromLocalFile(normalized))
             return
@@ -2060,6 +2137,7 @@ class ExplorerWindow(QMainWindow):
         self.view_mode_widget.setEnabled(True)
         self._select_machine_path(normalized)
         self.list_view.setRootIndex(root_index)
+        self._watch_directory(normalized)
         self._apply_file_visibility(normalized)
         self._auto_resize_name_column()
         self.address_bar.setText(normalized)
@@ -2076,6 +2154,29 @@ class ExplorerWindow(QMainWindow):
             self.navigation_history.record(normalized)
         self._update_nav_actions()
         self._update_status()
+
+    def _watch_directory(self, path: str) -> None:
+        if self._dir_watcher is None:
+            return
+        watched = self._dir_watcher.directories()
+        if watched:
+            self._dir_watcher.removePaths(watched)
+        if not is_network_path(path):
+            self._dir_watcher.addPath(path)
+
+    def _rescan_current_directory(self) -> None:
+        """Force the model to re-list the current folder (needed when Qt's own watcher is off)."""
+        if self._dir_watcher is None or self._showing_this_pc:
+            return
+        current = self.current_path()
+        # An always-empty folder keeps the round trip cheap (listing the parent can be slow).
+        away = os.path.join(QDir.tempPath(), "RetroFile-rescan")
+        os.makedirs(away, exist_ok=True)
+        if os.path.normcase(os.path.abspath(away)) == os.path.normcase(os.path.abspath(current)):
+            return
+        # Switching the model root away marks the old root unpopulated, so switching back re-lists it.
+        self.fs_model.setRootPath(away)
+        self.fs_model.setRootPath(current)
 
     def _auto_resize_name_column(self) -> None:
         self.list_view.resizeColumnToContents(0)
@@ -2914,6 +3015,7 @@ class ExplorerWindow(QMainWindow):
             self._update_status()
             return
 
+        self._rescan_current_directory()
         current = self.current_path()
         index = self.fs_model.index(current)
         self.list_view.setRootIndex(index)
