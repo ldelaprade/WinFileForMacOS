@@ -247,7 +247,7 @@ The installer is unsigned, so Windows may display a SmartScreen warning.
 
 ### macOS signed + notarized release (for sharing)
 
-Requirements before running:
+For a signed and notarized release:
 1. Apple Developer ID certificate in Keychain
 2. Store your App-specific password: `xcrun notarytool store-credentials notarytool-profile`
 3. `brew install create-dmg`
@@ -257,7 +257,16 @@ Requirements before running:
 make release
 ```
 
-This runs: build → sign → dmg → notarize → staple. Outputs `dist/RetroFile.dmg` ready to share.
+When the configured `DEV_ID` matches a valid code-signing identity in Keychain,
+this runs: build → sign → dmg → notarize → staple. Outputs
+`dist/RetroFile.dmg` ready to share.
+
+If that signing identity is missing (including when `DEV_ID` still has its
+placeholder value), `make release` automatically runs `make unsigned-dmg`
+instead, without prompting. It prints a notice that the DMG is unsigned.
+This does not bypass Gatekeeper: macOS may still block or warn about the
+unsigned application. Keychain access errors and failures during signing or
+notarization remain errors; they do not silently produce an unsigned release.
 
 ## Cleanup
 

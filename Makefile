@@ -59,7 +59,8 @@ build:
 	@echo "Drag to /Applications or run: open $(APP_BUNDLE)"
 endif
 
-unsigned-dmg: build dmg
+unsigned-dmg: build
+	$(MAKE) dmg
 	@echo "✓ Unsigned DMG ready: $(DMG_NAME)"
 
 # ── Debug build for crash tracing ───────────────────────────────────────────
@@ -158,8 +159,19 @@ else
 #   2. App-specific password stored: xcrun notarytool store-credentials $(PROFILE)
 #   3. brew install create-dmg  (for the dmg target)
 
-release: build sign dmg notarize staple
-	@echo "✓ Signed, notarized and stapled: $(DMG_NAME)"
+release:
+	@identities=$$(security find-identity -v -p codesigning) || exit $$?; \
+	if printf '%s\n' "$$identities" | grep -F -- "\"$(DEV_ID)\"" >/dev/null; then \
+		$(MAKE) build && \
+		$(MAKE) sign && \
+		$(MAKE) dmg && \
+		$(MAKE) notarize && \
+		$(MAKE) staple && \
+		echo "✓ Signed, notarized and stapled: $(DMG_NAME)"; \
+	else \
+		echo "Signing identity not found: $(DEV_ID). Building an unsigned DMG."; \
+		$(MAKE) unsigned-dmg; \
+	fi
 endif
 
 sign:
