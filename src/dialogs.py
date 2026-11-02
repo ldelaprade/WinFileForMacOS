@@ -31,9 +31,100 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .folder_archive import PACK_FORMATS, PackError, validate_destination
+
 if TYPE_CHECKING:
     from .git_operations import GitBranchInfo, GitChanges
     from .svn_operations import SvnChanges
+
+
+class PackFolderDialog(QDialog):
+    def __init__(self, source: str, parent: QMainWindow | None = None) -> None:
+        super().__init__(parent)
+        self.source = source
+        self.setWindowTitle("Pack Folder")
+        self.resize(600, 220)
+        layout = QVBoxLayout(self)
+        source_label = QLabel(f"Source: {source}", self)
+        source_label.setTextFormat(Qt.TextFormat.PlainText)
+        source_label.setWordWrap(True)
+        layout.addWidget(source_label)
+        form = QFormLayout()
+        self.format_combo = QComboBox(self)
+        for key, (label, _suffix, _filter) in PACK_FORMATS.items():
+            self.format_combo.addItem(label, key)
+        form.addRow("Format:", self.format_combo)
+        destination_row = QHBoxLayout()
+        self.destination_edit = QLineEdit(
+            str(Path.home() / f"{Path(source).name or 'archive'}.zip"), self,
+        )
+        destination_row.addWidget(self.destination_edit)
+        browse = QPushButton("Browse...", self)
+        browse.clicked.connect(self._browse)
+        destination_row.addWidget(browse)
+        form.addRow("Save as:", destination_row)
+        layout.addLayout(form)
+        self.description = QLabel(self)
+        self.description.setWordWrap(True)
+        layout.addWidget(self.description)
+        self.format_combo.currentIndexChanged.connect(self._format_changed)
+        self._format_changed()
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def archive_format(self) -> str:
+        return self.format_combo.currentData()
+
+    def destination(self) -> str:
+        return self.destination_edit.text().strip()
+
+    def _format_changed(self) -> None:
+        value = self.destination()
+        for suffix in (".tar.gz", ".zip", ".tar", ".iso"):
+            if value.lower().endswith(suffix):
+                value = value[:-len(suffix)]
+                break
+        self.destination_edit.setText(value + PACK_FORMATS[self.archive_format()][1])
+        self.description.setText(
+            "ISO creates a non-bootable data disc image and requires cdrtools/mkisofs."
+            if self.archive_format() == "iso" else
+            "GZIP packs the folder into a TAR archive, then compresses it (.tar.gz)."
+            if self.archive_format() == "gzip" else
+            "Packs the folder contents, including empty folders."
+        )
+
+    def _browse(self) -> None:
+        destination, _filter = QFileDialog.getSaveFileName(
+            self, "Save Archive", self.destination(), PACK_FORMATS[self.archive_format()][2],
+        )
+        if destination:
+            self.destination_edit.setText(destination)
+
+    def accept(self) -> None:
+        if not self.destination():
+            QMessageBox.warning(self, "Pack Folder", "Choose an output file.")
+            return
+        suffix = PACK_FORMATS[self.archive_format()][1]
+        if not self.destination().lower().endswith(suffix):
+            self.destination_edit.setText(self.destination() + suffix)
+        try:
+            validate_destination(Path(self.source), Path(self.destination()))
+        except (PackError, OSError) as error:
+            QMessageBox.warning(self, "Pack Folder", str(error))
+            return
+        if Path(self.destination()).exists():
+            answer = QMessageBox.question(
+                self, "Replace Archive", f"Replace the existing file?\n{self.destination()}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        super().accept()
 
 
 class CustomToolsDialog(QDialog):

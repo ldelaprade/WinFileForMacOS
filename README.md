@@ -148,6 +148,47 @@ destination must be new or empty; after checkout, the app opens the working copy
 Authentication uses the SVN prompt described above. Revert and conflict
 resolution are not included in this initial integration.
 
+## Pack a folder or drive
+
+Right-click a drive or folder in the left filesystem tree or right panel and
+select **Pack Folder...**. Right-clicking blank space in a folder packs the
+current folder. The dialog offers a format selector and output file picker:
+
+- **ZIP** (`.zip`): compressed archive.
+- **GZIP** (`.tar.gz`): a TAR archive compressed with gzip; gzip alone cannot
+  contain a folder tree.
+- **TAR** (`.tar`): uncompressed archive.
+- **ISO** (`.iso`): non-bootable data disc image, with Rock Ridge and Joliet
+  filename extensions.
+
+The source folder's contents are placed at the archive root. ZIP and TAR
+include hidden files and empty folders, preserve symbolic links without
+following them, and report unreadable entries rather than silently skipping
+them. ZIP metadata preservation depends on the extracting tool; TAR is
+preferable when Unix filesystem metadata matters.
+
+ZIP, TAR and GZIP use Python's built-in libraries. **ISO only** requires
+**cdrtools / mkisofs**:
+
+- macOS: `brew install cdrtools` (standard Intel and Apple Silicon Homebrew
+  locations are detected even when launching the app from Finder).
+- Linux: install a cdrtools/mkisofs package for your distribution.
+- Windows: install a trusted Windows build of cdrtools and put `mkisofs.exe`
+  on `PATH`, or select it when prompted.
+
+If mkisofs is not detected, the app offers an executable picker and remembers
+the selected path.
+
+Choose an output location **outside the source folder or drive**. Packing runs
+in the background with a busy dialog; keep the source connected and its files
+unchanged until it finishes. The source is only read. Existing output files
+require confirmation before replacement. On failure, partial output is removed
+and any existing destination file is preserved.
+
+There is deliberately **no bootable option or OS-specific remastering**. A data
+ISO is not a bootable installer or a sector-by-sector drive backup. Use an
+operating system's original installer ISO when creating a VM.
+
 ## Build
 
 ### Local unsigned app (for personal use)

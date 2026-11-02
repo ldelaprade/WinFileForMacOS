@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFileIconProvider,
     QFileSystemModel,
     QHBoxLayout,
@@ -88,6 +89,7 @@ from PySide6.QtWidgets import (
 from .dialogs import (
     ActionConfirmDialog,
     CustomToolsDialog,
+    PackFolderDialog,
     DeleteConfirmDialog,
     SshLocationDialog,
     FtpLocationDialog,
@@ -142,6 +144,9 @@ from .airs_vfs import (
 )
 from .navigation_state import NavigationHistory
 from .drive_report import DriveReportWidget
+from .folder_archive import (
+    PackError, find_mkisofs, pack_folder,
+)
 from .thumbnail_previews import ThumbnailPreviewProvider
 from .ui_theme import XPIconProvider, xp_stylesheet
 
@@ -194,6 +199,30 @@ class _ThumbnailPreviewWorker(QRunnable):
 
 class _VersionControlWorkerSignals(QObject):
     completed = Signal(object, bool)
+
+
+class _PackWorkerSignals(QObject):
+    completed = Signal(object, bool)
+
+
+class _PackWorker(QRunnable):
+    def __init__(
+        self, source: str, destination: str, archive_format: str, executable: str | None,
+    ) -> None:
+        super().__init__()
+        self.source = source
+        self.destination = destination
+        self.archive_format = archive_format
+        self.executable = executable
+        self.signals = _PackWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            result = pack_folder(self.source, self.destination, self.archive_format, self.executable)
+        except (PackError, OSError) as error:
+            self.signals.completed.emit(str(error), False)
+        else:
+            self.signals.completed.emit(result, True)
 
 
 _SVN_SESSION_CREDENTIALS: dict[str, tuple[str, str]] = {}
@@ -354,6 +383,10 @@ class ExplorerWindow(QMainWindow):
         self._vfs_thread_pool.setMaxThreadCount(1)
         self._vfs_worker: _VfsMountWorker | None = None
         self._vfs_progress: QProgressDialog | None = None
+        self._pack_worker: _PackWorker | None = None
+        self._pack_progress: QProgressDialog | None = None
+        self._pack_thread_pool = QThreadPool(self)
+        self._pack_thread_pool.setMaxThreadCount(1)
         self._unsubst_worker: _VfsUnmountWorker | None = None
         self._unsubst_progress: QProgressDialog | None = None
         self._vfs_drives: dict[str, str] = {}
@@ -978,6 +1011,10 @@ class ExplorerWindow(QMainWindow):
         self._update_status()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._pack_worker is not None:
+            QMessageBox.information(self, "Pack Folder", "Wait for packing to finish before closing.")
+            event.ignore()
+            return
         if self._git_worker is not None or self._svn_worker is not None:
             QMessageBox.information(self, "Version Control", "Wait for the current version-control operation to finish before closing.")
             event.ignore()
@@ -1183,6 +1220,8 @@ class ExplorerWindow(QMainWindow):
             if item is not None:
                 target = item.data(Qt.ItemDataRole.UserRole) or target
         self._add_custom_tools_menu(menu, target)
+        if os.path.isdir(target):
+            self._add_pack_folder_action(menu, target)
         self._add_vfs_actions(menu)
         menu.addSeparator()
         self._add_show_hidden_action(menu)
@@ -1725,6 +1764,7 @@ class ExplorerWindow(QMainWindow):
             menu.addAction("Browse", lambda target_path=path: self.navigate_to(target_path, record_history=True))
             menu.addAction("Add to Favorites", lambda target_path=path: self._add_favorite_with_feedback(target_path))
             self._add_unsubst_action(menu, path)
+            self._add_pack_folder_action(menu, path)
             menu.addSeparator()
         self._add_show_hidden_action(menu)
         menu.exec(self.this_pc_view.viewport().mapToGlobal(pos))
@@ -1737,7 +1777,61 @@ class ExplorerWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Browse", lambda: self.navigate_to(path, record_history=True))
         self._add_unsubst_action(menu, path)
+        self._add_pack_folder_action(menu, path)
         menu.exec(self.drive_report.table.viewport().mapToGlobal(pos))
+
+    def _add_pack_folder_action(self, menu: QMenu, path: str) -> None:
+        action = menu.addAction("Pack Folder...", lambda: self._pack_folder(path))
+        action.setEnabled(self._pack_worker is None)
+
+    def _pack_folder(self, source: str) -> None:
+        if self._pack_worker is not None:
+            QMessageBox.information(self, "Pack Folder", "A folder is already being packed.")
+            return
+        dialog = PackFolderDialog(source, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        archive_format = dialog.archive_format()
+        executable = None
+        if archive_format == "iso":
+            executable = find_mkisofs() or self._settings.value("iso/mkisofs", "", type=str)
+            if executable and not (os.path.isfile(executable) and os.access(executable, os.X_OK)):
+                executable = None
+            if not executable:
+                QMessageBox.information(
+                    self, "mkisofs required",
+                    "ISO creation requires cdrtools/mkisofs.\n\n"
+                    "macOS: brew install cdrtools\n"
+                    "Linux: install your distribution's cdrtools/mkisofs package.\n"
+                    "Windows: install a trusted Windows build of cdrtools.\n\n"
+                    "Select the installed mkisofs executable to continue.",
+                )
+                executable, _filter = QFileDialog.getOpenFileName(self, "Locate mkisofs")
+                if not executable:
+                    return
+                self._settings.setValue("iso/mkisofs", executable)
+        worker = _PackWorker(source, dialog.destination(), archive_format, executable)
+        progress = QProgressDialog("Packing folder... Keep the source connected and unchanged.", "", 0, 0, self)
+        progress.setWindowTitle("Pack Folder")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        worker.signals.completed.connect(self._on_pack_completed)
+        self._pack_worker = worker
+        self._pack_progress = progress
+        progress.show()
+        self._pack_thread_pool.start(worker)
+
+    def _on_pack_completed(self, result: object, success: bool) -> None:
+        self._pack_worker = None
+        if self._pack_progress is not None:
+            self._pack_progress.close()
+            self._pack_progress = None
+        if not success:
+            QMessageBox.warning(self, "Pack Folder", str(result))
+            return
+        self.refresh()
+        QMessageBox.information(self, "Folder Packed", f"Created:\n{result}")
 
     def _add_unsubst_action(self, menu: QMenu, path: str) -> None:
         root = path.replace("\\", "/").rstrip("/").upper()
