@@ -16,6 +16,67 @@ from src.file_explorer import ExplorerWindow, _VfsUnmountWorker
 
 
 class FileExplorerOpenTests(unittest.TestCase):
+    def test_application_trash_action_platform_and_bundle_gating(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "Example.app"
+            app.mkdir()
+            for platform, expected in (("darwin", True), ("linux", False), ("win32", False)):
+                with self.subTest(platform=platform), patch("src.file_explorer.sys.platform", platform):
+                    self.assertEqual(ExplorerWindow._is_app_bundle(str(app)), expected)
+            with patch("src.file_explorer.sys.platform", "darwin"):
+                self.assertFalse(ExplorerWindow._is_app_bundle(directory))
+
+    def test_system_application_is_protected_without_stat(self):
+        self.assertTrue(ExplorerWindow._application_is_protected("/System/Applications/Example.app"))
+
+    def test_application_trash_menu_protected_and_unprotected(self):
+        for protected in (False, True):
+            window = MagicMock()
+            window._is_app_bundle.return_value = True
+            window._application_is_protected.return_value = protected
+            menu = MagicMock()
+            ExplorerWindow._add_application_trash_action(window, menu, "/Applications/Example.app")
+            menu.addAction.return_value.setEnabled.assert_called_once_with(not protected)
+            menu.addAction.call_args.args[1]()
+            window._trash_application.assert_called_once_with("/Applications/Example.app")
+
+    def test_application_trash_rejects_protected_or_missing_bundle(self):
+        for missing in (False, True):
+            window = MagicMock()
+            window._is_app_bundle.return_value = not missing
+            window._application_is_protected.return_value = not missing
+            with patch("src.file_explorer.QMessageBox.warning") as warning, \
+                    patch("src.file_explorer.move_items_to_trash") as trash:
+                ExplorerWindow._trash_application(window, "/Applications/Example.app")
+            warning.assert_called_once()
+            trash.assert_not_called()
+
+    def test_application_trash_confirmation_cancel_errors_and_success(self):
+        path = "/Applications/Example.app"
+        for accepted, failures in ((False, []), (True, []), (True, ["Permission denied"])):
+            with self.subTest(accepted=accepted, failures=failures):
+                window = MagicMock()
+                window._is_app_bundle.return_value = True
+                window._application_is_protected.return_value = False
+                window._trash_mode_enabled = False
+                with patch("src.file_explorer.DeleteConfirmDialog") as dialog, \
+                        patch("src.file_explorer.move_items_to_trash", return_value=failures) as trash, \
+                        patch("src.file_explorer.delete_items") as delete, \
+                        patch("src.file_explorer.QMessageBox.warning") as warning:
+                    dialog.return_value.exec.return_value = QDialog.Accepted if accepted else QDialog.Rejected
+                    ExplorerWindow._trash_application(window, path)
+                self.assertIn("user data will be retained", dialog.call_args.args[0])
+                self.assertIn("vendor's uninstaller", dialog.call_args.args[0])
+                delete.assert_not_called()
+                if accepted:
+                    trash.assert_called_once_with([path])
+                    window.refresh.assert_called_once()
+                else:
+                    trash.assert_not_called()
+                    window.refresh.assert_not_called()
+                self.assertEqual(warning.called, bool(failures))
+                self.assertEqual(window.status.showMessage.called, accepted and not failures)
+
     def test_custom_tool_passes_target_as_one_argument(self):
         for target in ("/work/current folder", "/work/file name;echo.txt"):
             with self.subTest(target=target):
@@ -335,6 +396,13 @@ class CustomToolsUiTests(unittest.TestCase):
                     with patch("src.file_explorer.QMenu"):
                         ExplorerWindow._show_context_menu(window, pos)
                     self.assertEqual(window._add_custom_tools_menu.call_args.args[1], expected)
+                    if row is None:
+                        window._add_application_trash_action.assert_not_called()
+                    else:
+                        self.assertEqual(
+                            window._add_application_trash_action.call_args.args[1], expected,
+                        )
+                    window._add_application_trash_action.reset_mock()
                 view.close()
 
     def test_configure_persists_tools_and_cancel_leaves_them_unchanged(self):

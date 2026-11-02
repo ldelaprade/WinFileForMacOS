@@ -22,6 +22,11 @@ A classic Windows-inspired file manager for macOS, Windows, and Linux, built wit
 - Status bar (item count and selected size)
 - Context menu operations (Open, Rename, Delete/Move to Trash, New Folder..., New File..., Refresh)
 - Global system Trash mode toggle beside Refresh; when enabled, selected items go to the OS Trash/Recycle Bin
+- On macOS, right-click an `.app` bundle in Details or Thumbnails and choose
+  **Move Application to Trash...**. This always uses Trash, even when global
+  Trash mode is off. Confirmation explains that preferences, support files and
+  user data remain; quit the app first and use a vendor uninstaller for apps with
+  services or drivers. Protected system apps are disabled for this action.
 - Drag-and-drop move between folders
 - Drag selected files out to external apps and web upload drop zones
 - Browse SMB / Samba / NFS network shares via a permanent **Network** node in the left panel

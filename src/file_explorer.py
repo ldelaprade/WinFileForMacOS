@@ -4,6 +4,7 @@ import os
 import json
 import shlex
 import shutil
+import stat
 import sys
 import threading
 from collections import deque
@@ -1211,14 +1212,19 @@ class ExplorerWindow(QMainWindow):
         self._add_svn_menu(menu)
         source = self.sender()
         target = self.current_path()
+        clicked_target = None
         if isinstance(source, QTreeView):
             index = source.indexAt(pos)
             if index.isValid():
                 target = self.fs_model.filePath(index)
+                clicked_target = target
         elif isinstance(source, QListWidget):
             item = source.itemAt(pos)
             if item is not None:
                 target = item.data(Qt.ItemDataRole.UserRole) or target
+                clicked_target = target
+        if clicked_target is not None:
+            self._add_application_trash_action(menu, clicked_target)
         self._add_custom_tools_menu(menu, target)
         if os.path.isdir(target):
             self._add_pack_folder_action(menu, target)
@@ -2910,6 +2916,65 @@ class ExplorerWindow(QMainWindow):
         if sys.platform != "darwin":
             return False
         return os.path.isdir(path) and path.lower().endswith(".app")
+
+    @staticmethod
+    def _application_is_protected(path: str) -> bool:
+        resolved = Path(path).resolve()
+        if resolved == Path("/System") or Path("/System") in resolved.parents:
+            return True
+        flags = getattr(resolved.stat(), "st_flags", 0)
+        protected_flags = (
+            getattr(stat, "UF_IMMUTABLE", 0)
+            | getattr(stat, "SF_IMMUTABLE", 0)
+            | getattr(stat, "SF_RESTRICTED", 0)
+        )
+        return bool(flags & protected_flags)
+
+    def _add_application_trash_action(self, menu: QMenu, path: str) -> None:
+        if not self._is_app_bundle(path):
+            return
+        action = menu.addAction(
+            "Move Application to Trash...", lambda: self._trash_application(path),
+        )
+        try:
+            protected = self._application_is_protected(path)
+        except OSError as error:
+            action.setEnabled(False)
+            action.setToolTip(f"Cannot inspect application: {error}")
+            return
+        action.setEnabled(not protected)
+        if protected:
+            action.setToolTip("Protected system applications cannot be removed.")
+
+    def _trash_application(self, path: str) -> None:
+        try:
+            if not self._is_app_bundle(path):
+                raise OSError("The selected application is no longer available.")
+            if self._application_is_protected(path):
+                raise OSError("Protected system applications cannot be removed.")
+        except OSError as error:
+            QMessageBox.warning(self, "Move Application to Trash", str(error))
+            return
+        dialog = DeleteConfirmDialog(
+            f"Move application '{Path(path).name}' to the system Trash?\n\n{path}\n\n"
+            "Quit the application before continuing.\n"
+            "Preferences, caches, support files and user data will be retained.\n"
+            "Apps with services, drivers or privileged helpers may require the "
+            "vendor's uninstaller instead.",
+            self, title="Move Application to Trash", accept_label="Move to Trash",
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        failures = move_items_to_trash([path])
+        self.refresh()
+        if failures:
+            QMessageBox.warning(
+                self, "Move Application to Trash",
+                "Could not move the application to Trash. Quit it and check permissions.\n\n"
+                + "\n".join(failures),
+            )
+        else:
+            self.status.showMessage(f"Moved {Path(path).name} to Trash", 3000)
 
     def edit_selected(self) -> None:
         paths = self.selected_paths()
