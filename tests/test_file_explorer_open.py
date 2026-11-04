@@ -16,6 +16,20 @@ from src.file_explorer import ExplorerWindow, _VfsUnmountWorker
 
 
 class FileExplorerOpenTests(unittest.TestCase):
+    def test_copy_paths_updates_internal_and_system_clipboards(self):
+        paths = ["/work/notes.txt", "/work/Project Folder"]
+        window = MagicMock()
+        clipboard = MagicMock()
+
+        with patch("src.file_explorer.QApplication.clipboard", return_value=clipboard):
+            ExplorerWindow._copy_paths(window, paths)
+
+        self.assertEqual(window._clipboard_paths, paths)
+        self.assertEqual(window._clipboard_mode, "copy")
+        mime_data = clipboard.setMimeData.call_args.args[0]
+        self.assertEqual([url.toLocalFile() for url in mime_data.urls()], paths)
+        self.assertEqual(mime_data.text(), "\n".join(paths))
+
     def test_application_trash_action_platform_and_bundle_gating(self):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory) / "Example.app"

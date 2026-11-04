@@ -24,6 +24,7 @@ from PySide6.QtCore import (
     QFileSystemWatcher,
     QLockFile,
     QModelIndex,
+    QMimeData,
     QObject,
     QPoint,
     QPointF,
@@ -1223,6 +1224,13 @@ class ExplorerWindow(QMainWindow):
             if item is not None:
                 target = item.data(Qt.ItemDataRole.UserRole) or target
                 clicked_target = target
+        if clicked_target is not None:
+            menu.addSeparator()
+            menu.addAction("Copy", lambda path=clicked_target: self._copy_paths([path]))
+            menu.addAction("Cut", lambda path=clicked_target: self._cut_paths([path]))
+        if os.path.isdir(target):
+            menu.addAction("Paste", lambda destination=target: self.paste_into_current(destination))
+            menu.addSeparator()
         if clicked_target is not None:
             self._add_application_trash_action(menu, clicked_target)
         self._add_custom_tools_menu(menu, target)
@@ -3006,28 +3014,37 @@ class ExplorerWindow(QMainWindow):
             QMessageBox.critical(self, "Edit failed", str(error))
 
     def copy_selected(self) -> None:
-        paths = self.selected_paths()
+        self._copy_paths(self.selected_paths())
+
+    def _copy_paths(self, paths: list[str]) -> None:
         if not paths:
             return
         self._clipboard_paths = paths
         self._clipboard_mode = "copy"
+        mime_data = QMimeData()
+        urls = [QUrl.fromLocalFile(path) for path in paths]
+        mime_data.setUrls(urls)
+        mime_data.setText("\n".join(paths))
+        QApplication.clipboard().setMimeData(mime_data)
         self.status.showMessage(f"Copied {len(paths)} item(s)", 2500)
 
     def cut_selected(self) -> None:
-        paths = self.selected_paths()
+        self._cut_paths(self.selected_paths())
+
+    def _cut_paths(self, paths: list[str]) -> None:
         if not paths:
             return
         self._clipboard_paths = paths
         self._clipboard_mode = "cut"
         self.status.showMessage(f"Cut {len(paths)} item(s)", 2500)
 
-    def paste_into_current(self) -> None:
+    def paste_into_current(self, destination_path: str | None = None) -> None:
         if self._showing_this_pc:
             return
         if not self._clipboard_paths or self._clipboard_mode is None:
             return
 
-        destination_dir = Path(self.current_path())
+        destination_dir = Path(destination_path or self.current_path())
         if not destination_dir.is_dir():
             return
 
