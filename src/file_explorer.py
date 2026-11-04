@@ -278,6 +278,28 @@ class _VfsUnmountWorker(QRunnable):
             self.signals.completed.emit(self.drive_letter, True)
 
 
+class _DiskUnmountWorker(QRunnable):
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.path = path
+        self.signals = _VfsMountWorkerSignals()
+
+    def run(self) -> None:
+        try:
+            subprocess.run(
+                ["diskutil", "unmount", self.path],
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            detail = getattr(error, "stderr", None) or str(error)
+            self.signals.completed.emit(detail, False)
+        else:
+            self.signals.completed.emit(self.path, True)
+
+
 class _GitWorker(QRunnable):
     def __init__(self, directory: str, action: str, paths: list[str], message: str) -> None:
         super().__init__()
@@ -391,6 +413,9 @@ class ExplorerWindow(QMainWindow):
         self._pack_thread_pool.setMaxThreadCount(1)
         self._unsubst_worker: _VfsUnmountWorker | None = None
         self._unsubst_progress: QProgressDialog | None = None
+        self._disk_unmount_thread_pool = QThreadPool(self)
+        self._disk_unmount_thread_pool.setMaxThreadCount(1)
+        self._disk_unmount_worker: _DiskUnmountWorker | None = None
         self._vfs_drives: dict[str, str] = {}
         self._thumbnail_render_token = 0
         self._thumbnail_pending_items: list[tuple[QListWidgetItem, str]] = []
@@ -1778,10 +1803,36 @@ class ExplorerWindow(QMainWindow):
             menu.addAction("Browse", lambda target_path=path: self.navigate_to(target_path, record_history=True))
             menu.addAction("Add to Favorites", lambda target_path=path: self._add_favorite_with_feedback(target_path))
             self._add_unsubst_action(menu, path)
+            self._add_unmount_drive_action(menu, path)
             self._add_pack_folder_action(menu, path)
             menu.addSeparator()
         self._add_show_hidden_action(menu)
         menu.exec(self.this_pc_view.viewport().mapToGlobal(pos))
+
+    def _add_unmount_drive_action(self, menu: QMenu, path: str) -> None:
+        if DriveReportWidget.is_removable_macos_volume(path):
+            menu.addAction("Unmount Drive", lambda target_path=path: self._unmount_drive(target_path))
+
+    def _unmount_drive(self, path: str) -> None:
+        if self._disk_unmount_worker is not None:
+            return
+        worker = _DiskUnmountWorker(path)
+        worker.signals.completed.connect(self._on_disk_unmount_completed)
+        self._disk_unmount_worker = worker
+        self._disk_unmount_thread_pool.start(worker)
+
+    def _on_disk_unmount_completed(self, result: object, success: bool) -> None:
+        worker = self._disk_unmount_worker
+        self._disk_unmount_worker = None
+        if not success or worker is None:
+            QMessageBox.warning(
+                self,
+                "Unmount Drive",
+                f"Could not unmount the drive:\n{worker.path if worker else ''}\n\n{result}",
+            )
+            return
+        self.refresh()
+        self.status.showMessage(f"Unmounted {Path(worker.path).name or worker.path}", 3000)
 
     def _show_drive_report_context_menu(self, pos: QPoint) -> None:
         item = self.drive_report.table.itemAt(pos)

@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import (
 
 from src.airs_vfs.drive import DriveError
 from src.dialogs import CustomToolsDialog
-from src.file_explorer import ExplorerWindow, _VfsUnmountWorker
+from src.file_explorer import ExplorerWindow, _DiskUnmountWorker, _VfsUnmountWorker
 
 
 class FileExplorerOpenTests(unittest.TestCase):
@@ -243,6 +244,50 @@ class FileExplorerOpenTests(unittest.TestCase):
                     self.assertEqual(menu.addAction.call_args.args[0], "Unsubst...")
                     menu.addAction.call_args.args[1]()
                     window._unsubst_drive.assert_called_with("S", "target")
+
+    def test_unmount_menu_only_appears_for_removable_macos_volumes(self):
+        path = "/Volumes/USB"
+        for removable in (False, True):
+            with self.subTest(removable=removable):
+                menu = MagicMock()
+                window = MagicMock()
+                with patch(
+                    "src.file_explorer.DriveReportWidget.is_removable_macos_volume",
+                    return_value=removable,
+                ):
+                    ExplorerWindow._add_unmount_drive_action(window, menu, path)
+                self.assertEqual(menu.addAction.called, removable)
+                if removable:
+                    self.assertEqual(menu.addAction.call_args.args[0], "Unmount Drive")
+                    menu.addAction.call_args.args[1]()
+                    window._unmount_drive.assert_called_once_with(path)
+
+    def test_disk_unmount_worker_runs_diskutil_and_reports_result(self):
+        path = "/Volumes/USB Stick"
+        worker = _DiskUnmountWorker(path)
+        completed = MagicMock()
+        worker.signals.completed.connect(completed)
+        with patch("src.file_explorer.subprocess.run") as run:
+            worker.run()
+        run.assert_called_once_with(
+            ["diskutil", "unmount", path],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=15,
+        )
+        completed.assert_called_once_with(path, True)
+
+    def test_disk_unmount_worker_reports_system_error(self):
+        worker = _DiskUnmountWorker("/Volumes/USB")
+        completed = MagicMock()
+        worker.signals.completed.connect(completed)
+        with patch(
+            "src.file_explorer.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "diskutil", stderr="resource busy"),
+        ):
+            worker.run()
+        completed.assert_called_once_with("resource busy", False)
 
     @unittest.skipIf(os.name == "nt", "POSIX execute permissions are required")
     def test_open_launches_executable_file(self):

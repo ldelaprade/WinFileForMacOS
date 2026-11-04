@@ -1,5 +1,6 @@
 import stat
 import json
+import plistlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -142,6 +143,48 @@ class LinuxVolumeVisibilityTests(unittest.TestCase):
             [volume.rootPath() for volume in unique_volumes],
             ["/", "/boot/efi", "/media/user/disk"],
         )
+
+
+class MacOSRemovableVolumeTests(unittest.TestCase):
+    def test_removable_volume_requires_matching_mount_and_ejectability(self):
+        path = "/Volumes/USB Stick"
+        info = {
+            "MountPoint": path,
+            "Ejectable": 1,
+            "Removable": 0,
+        }
+        with patch("src.drive_report.sys.platform", "darwin"), patch(
+            "src.drive_report.subprocess.run",
+            return_value=SimpleNamespace(stdout=plistlib.dumps(info)),
+        ) as run:
+            self.assertTrue(DriveReportWidget.is_removable_macos_volume(path))
+        run.assert_called_once_with(
+            ["diskutil", "info", "-plist", path],
+            capture_output=True,
+            check=True,
+            timeout=5,
+        )
+
+    def test_internal_or_mismatched_volume_is_not_removable(self):
+        for info in (
+            {"MountPoint": "/Volumes/External", "Ejectable": 0, "Removable": 0},
+            {"MountPoint": "/Volumes/Other", "Ejectable": 1},
+        ):
+            with self.subTest(info=info), patch("src.drive_report.sys.platform", "darwin"), patch(
+                "src.drive_report.subprocess.run",
+                return_value=SimpleNamespace(stdout=plistlib.dumps(info)),
+            ):
+                self.assertFalse(
+                    DriveReportWidget.is_removable_macos_volume("/Volumes/External")
+                )
+
+    def test_non_volume_paths_skip_diskutil_probe(self):
+        with patch("src.drive_report.sys.platform", "darwin"), patch(
+            "src.drive_report.subprocess.run"
+        ) as run:
+            self.assertFalse(DriveReportWidget.is_removable_macos_volume("/"))
+            self.assertFalse(DriveReportWidget.is_removable_macos_volume("/Users/me"))
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

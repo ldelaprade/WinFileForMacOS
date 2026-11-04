@@ -293,6 +293,37 @@ class DriveReportWidget(QWidget):
         return volume.displayName().strip() or root_path
 
     @staticmethod
+    def is_removable_macos_volume(path: str) -> bool:
+        if sys.platform != "darwin":
+            return False
+        mount_path = os.path.normpath(path)
+        if mount_path == "/" or not mount_path.startswith("/Volumes/"):
+            return False
+        try:
+            result = subprocess.run(
+                ["diskutil", "info", "-plist", mount_path],
+                capture_output=True,
+                check=True,
+                timeout=5,
+            )
+            info = plistlib.loads(result.stdout)
+        except (OSError, subprocess.SubprocessError, plistlib.InvalidFileException, ValueError):
+            return False
+
+        reported_mount = info.get("MountPoint") if isinstance(info, dict) else None
+        if not isinstance(reported_mount, str) or os.path.normpath(reported_mount) != mount_path:
+            return False
+        return any(
+            info.get(key) is True or info.get(key) == 1
+            for key in (
+                "Ejectable",
+                "Removable",
+                "RemovableMedia",
+                "RemovableMediaOrExternalDevice",
+            )
+        )
+
+    @staticmethod
     def _format_size(size_bytes: int) -> str:
         size = float(size_bytes)
         for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
