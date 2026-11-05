@@ -396,6 +396,23 @@ class FileExplorerOpenTests(unittest.TestCase):
                     menu.addAction.call_args.args[1]()
                     window._unmount_drive.assert_called_once_with(path)
 
+    def test_linux_eject_menu_only_appears_for_removable_volumes(self):
+        path = "/media/user/USB"
+        for device in (None, "/dev/sdb"):
+            with self.subTest(device=device):
+                menu = MagicMock()
+                window = MagicMock()
+                with patch("src.file_explorer.sys.platform", "linux"), patch(
+                    "src.file_explorer.DriveReportWidget.linux_removable_device",
+                    return_value=device,
+                ):
+                    ExplorerWindow._add_unmount_drive_action(window, menu, path)
+                self.assertEqual(menu.addAction.called, device is not None)
+                if device:
+                    self.assertEqual(menu.addAction.call_args.args[0], "Eject Drive")
+                    menu.addAction.call_args.args[1]()
+                    window._unmount_drive.assert_called_once_with(path)
+
     def test_disk_unmount_worker_runs_diskutil_and_reports_result(self):
         path = "/Volumes/USB Stick"
         worker = _DiskUnmountWorker(path)
@@ -412,6 +429,63 @@ class FileExplorerOpenTests(unittest.TestCase):
             timeout=15,
         )
         completed.assert_called_once_with(path, True)
+
+    def test_linux_eject_worker_powers_off_removable_parent_disk(self):
+        path = "/media/user/USB"
+        worker = _DiskUnmountWorker(path)
+        completed = MagicMock()
+        worker.signals.completed.connect(completed)
+        with patch("src.file_explorer.sys.platform", "linux"), patch(
+            "src.file_explorer.DriveReportWidget.linux_removable_device_info",
+            return_value=("/dev/sdb", ["/dev/sdc1"]),
+        ), patch("src.file_explorer.subprocess.run") as run:
+            worker.run()
+        self.assertEqual(
+            run.call_args_list,
+            [
+                unittest.mock.call(
+                    ["udisksctl", "unmount", "--block-device", "/dev/sdc1"],
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                    timeout=30,
+                ),
+                unittest.mock.call(
+                    ["udisksctl", "power-off", "--block-device", "/dev/sdb"],
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                    timeout=30,
+                ),
+            ],
+        )
+        completed.assert_called_once_with(path, True)
+
+    def test_linux_eject_worker_refuses_unrecognized_device(self):
+        worker = _DiskUnmountWorker("/media/user/USB")
+        completed = MagicMock()
+        worker.signals.completed.connect(completed)
+        with patch("src.file_explorer.sys.platform", "linux"), patch(
+            "src.file_explorer.DriveReportWidget.linux_removable_device_info", return_value=None
+        ), patch("src.file_explorer.subprocess.run") as run:
+            worker.run()
+        run.assert_not_called()
+        self.assertFalse(completed.call_args.args[1])
+        self.assertIn("removable Linux drive", completed.call_args.args[0])
+
+    def test_linux_eject_worker_does_not_power_off_when_unmount_fails(self):
+        path = "/media/user/USB"
+        worker = _DiskUnmountWorker(path)
+        completed = MagicMock()
+        worker.signals.completed.connect(completed)
+        error = subprocess.CalledProcessError(1, "udisksctl", stderr="device is busy")
+        with patch("src.file_explorer.sys.platform", "linux"), patch(
+            "src.file_explorer.DriveReportWidget.linux_removable_device_info",
+            return_value=("/dev/sdb", ["/dev/sdb1"]),
+        ), patch("src.file_explorer.subprocess.run", side_effect=error) as run:
+            worker.run()
+        run.assert_called_once()
+        completed.assert_called_once_with("device is busy", False)
 
     def test_disk_unmount_worker_reports_system_error(self):
         worker = _DiskUnmountWorker("/Volumes/USB")

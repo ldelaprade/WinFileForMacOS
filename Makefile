@@ -4,7 +4,7 @@ run:
 # ── Configuration ────────────────────────────────────────────────────────────
 APP_NAME      := RetroFile
 APP_BUNDLE    := dist/$(APP_NAME).app
-DEB_VERSION   ?= 2.0.3
+DEB_VERSION   ?= 3.0.0
 WIN_VERSION   ?= $(DEB_VERSION)
 ISCC          ?= ISCC.exe
 ifeq ($(OS),Windows_NT)

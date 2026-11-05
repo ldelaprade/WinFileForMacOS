@@ -422,6 +422,78 @@ class DriveReportWidget(QWidget):
         )
 
     @staticmethod
+    def linux_removable_device(path: str) -> str | None:
+        info = DriveReportWidget.linux_removable_device_info(path)
+        return info[0] if info else None
+
+    @staticmethod
+    def linux_removable_device_info(path: str) -> tuple[str, list[str]] | None:
+        if not sys.platform.startswith("linux"):
+            return None
+        mount_path = os.path.normpath(path)
+        if not mount_path.startswith("/") or mount_path == "/":
+            return None
+        try:
+            result = subprocess.run(
+                [
+                    "lsblk", "--json", "--paths", "--output",
+                    "NAME,TYPE,RM,HOTPLUG,MOUNTPOINTS",
+                ],
+                capture_output=True,
+                check=True,
+                timeout=5,
+            )
+            devices = json.loads(result.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+
+        def enabled(value: object) -> bool:
+            return str(value).strip().lower() in {"1", "true", "yes"}
+
+        def mountpoints(device: dict) -> list[str]:
+            values = device.get("mountpoints") or [device.get("mountpoint")]
+            return [value for value in values if isinstance(value, str)]
+
+        def mounted_devices(device: dict) -> list[str]:
+            children = [
+                name
+                for child in device.get("children", [])
+                for name in mounted_devices(child)
+            ]
+            name = device.get("name") or ""
+            if name and mountpoints(device):
+                children.append(name)
+            return children
+
+        def find_device(device: dict) -> tuple[str, list[str]] | None:
+            if device.get("type") == "disk":
+                disk = device.get("name") or ""
+                removable = enabled(device.get("rm")) or enabled(device.get("hotplug"))
+                if removable:
+                    all_mountpoints = []
+
+                    def collect_mountpoints(node: dict) -> None:
+                        all_mountpoints.extend(mountpoints(node))
+                        for child in node.get("children", []):
+                            collect_mountpoints(child)
+
+                    collect_mountpoints(device)
+                    if mount_path in map(os.path.normpath, all_mountpoints):
+                        return disk, mounted_devices(device)
+
+            for child in device.get("children", []):
+                match = find_device(child)
+                if match:
+                    return match
+            return None
+
+        for device in devices.get("blockdevices", []):
+            match = find_device(device)
+            if match:
+                return match
+        return None
+
+    @staticmethod
     def _format_size(size_bytes: int) -> str:
         size = float(size_bytes)
         for unit in ("B", "KB", "MB", "GB", "TB", "PB"):

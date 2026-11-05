@@ -263,6 +263,52 @@ class LinuxVolumeVisibilityTests(unittest.TestCase):
         )
 
 
+    def test_removable_mount_resolves_to_parent_disk(self):
+        metadata = {"blockdevices": [{
+            "name": "/dev/sdb", "type": "disk", "rm": True, "hotplug": True,
+            "children": [{
+                "name": "/dev/sdb1", "type": "part",
+                "mountpoints": ["/media/user/USB"],
+                "children": [{
+                    "name": "/dev/mapper/usb", "type": "crypt",
+                    "mountpoints": ["/media/user/USB/data"],
+                }],
+            }],
+        }]}
+        with patch("src.drive_report.sys.platform", "linux"), patch(
+            "src.drive_report.subprocess.run",
+            return_value=SimpleNamespace(stdout=json.dumps(metadata)),
+        ) as run:
+            self.assertEqual(
+                DriveReportWidget.linux_removable_device("/media/user/USB"), "/dev/sdb"
+            )
+            self.assertEqual(
+                DriveReportWidget.linux_removable_device_info("/media/user/USB"),
+                ("/dev/sdb", ["/dev/mapper/usb", "/dev/sdb1"]),
+            )
+        self.assertIn("RM,HOTPLUG,MOUNTPOINTS", run.call_args.args[0][-1])
+
+    def test_internal_unmounted_and_root_volumes_are_not_ejectable(self):
+        metadata = {"blockdevices": [{
+            "name": "/dev/sda", "type": "disk", "rm": False, "hotplug": False,
+            "children": [{
+                "name": "/dev/sda1", "type": "part",
+                "mountpoints": ["/mnt/internal"],
+            }],
+        }, {
+            "name": "/dev/sdb", "type": "disk", "rm": "1", "hotplug": "0",
+            "children": [{
+                "name": "/dev/sdb1", "type": "part", "mountpoints": [None],
+            }],
+        }]}
+        with patch("src.drive_report.sys.platform", "linux"), patch(
+            "src.drive_report.subprocess.run",
+            return_value=SimpleNamespace(stdout=json.dumps(metadata)),
+        ):
+            self.assertIsNone(DriveReportWidget.linux_removable_device("/mnt/internal"))
+            self.assertIsNone(DriveReportWidget.linux_removable_device("/"))
+
+
 class MacOSRemovableVolumeTests(unittest.TestCase):
     def test_removable_volume_requires_matching_mount_and_ejectability(self):
         path = "/Volumes/USB Stick"

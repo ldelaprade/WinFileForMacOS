@@ -10,7 +10,7 @@ import threading
 from collections import deque
 import subprocess
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse, urlunparse
 import math
@@ -288,6 +288,26 @@ class _DiskUnmountWorker(QRunnable):
         try:
             if sys.platform == "win32":
                 DriveReportWidget.eject_windows_volume(self.path)
+            elif sys.platform.startswith("linux"):
+                device_info = DriveReportWidget.linux_removable_device_info(self.path)
+                if device_info is None:
+                    raise OSError("Only a mounted removable Linux drive can be ejected.")
+                device, mounted_devices = device_info
+                for mounted_device in mounted_devices:
+                    subprocess.run(
+                        ["udisksctl", "unmount", "--block-device", mounted_device],
+                        capture_output=True,
+                        check=True,
+                        text=True,
+                        timeout=30,
+                    )
+                subprocess.run(
+                    ["udisksctl", "power-off", "--block-device", device],
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                    timeout=30,
+                )
             else:
                 subprocess.run(
                     ["diskutil", "unmount", self.path],
@@ -1816,8 +1836,9 @@ class ExplorerWindow(QMainWindow):
 
     def _add_unmount_drive_action(self, menu: QMenu, path: str) -> None:
         if (DriveReportWidget.is_removable_windows_volume(path)
-                or DriveReportWidget.is_removable_macos_volume(path)):
-            label = "Eject Drive" if sys.platform == "win32" else "Unmount Drive"
+                or DriveReportWidget.is_removable_macos_volume(path)
+                or DriveReportWidget.linux_removable_device(path)):
+            label = "Unmount Drive" if sys.platform == "darwin" else "Eject Drive"
             action = menu.addAction(label, lambda target_path=path: self._unmount_drive(target_path))
             action.setEnabled(self._disk_unmount_worker is None)
 
@@ -1829,6 +1850,11 @@ class ExplorerWindow(QMainWindow):
             root = path.replace("\\", "/").casefold()
             if current.rstrip("/") == root.rstrip("/") or current.startswith(root):
                 self.navigate_to(str(Path.home()), record_history=True)
+        elif sys.platform.startswith("linux"):
+            current = os.path.normpath(self.current_path())
+            root = os.path.normpath(path)
+            if current == root or current.startswith(root.rstrip("/") + "/"):
+                self.navigate_to(str(Path.home()), record_history=True)
         worker = _DiskUnmountWorker(path)
         worker.signals.completed.connect(self._on_disk_unmount_completed)
         self._disk_unmount_worker = worker
@@ -1837,18 +1863,23 @@ class ExplorerWindow(QMainWindow):
     def _on_disk_unmount_completed(self, result: object, success: bool) -> None:
         worker = self._disk_unmount_worker
         self._disk_unmount_worker = None
-        title = "Eject Drive" if sys.platform == "win32" else "Unmount Drive"
+        title = "Unmount Drive" if sys.platform == "darwin" else "Eject Drive"
         if not success or worker is None:
             QMessageBox.warning(
                 self,
                 title,
-                f"Could not {'eject' if sys.platform == 'win32' else 'unmount'} the drive:\n"
+                f"Could not {'unmount' if sys.platform == 'darwin' else 'eject'} the drive:\n"
                 f"{worker.path if worker else ''}\n\n{result}",
             )
             return
         self.refresh()
-        verb = "Ejected" if sys.platform == "win32" else "Unmounted"
-        self.status.showMessage(f"{verb} {Path(worker.path).name or worker.path}", 3000)
+        verb = "Unmounted" if sys.platform == "darwin" else "Ejected"
+        path_name = (
+            PureWindowsPath(worker.path).name or worker.path
+            if sys.platform == "win32"
+            else Path(worker.path).name or worker.path
+        )
+        self.status.showMessage(f"{verb} {path_name}", 3000)
 
     def _show_drive_report_context_menu(self, pos: QPoint) -> None:
         item = self.drive_report.table.itemAt(pos)
