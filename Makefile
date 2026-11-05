@@ -133,7 +133,7 @@ build-deb: build-linux
 # ── Windows build ──────────────────────────────────────────────────────────────
 build-windows:
 	$(PIP) install -q -r requirements.txt pyinstaller
-	$(PYINSTALLER) --windowed \
+	$(PYINSTALLER) --clean --windowed \
 	            --onefile \
 	            --name "$(APP_NAME)" \
 	            --noconfirm \

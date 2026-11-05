@@ -79,9 +79,8 @@ class DriveReportWidget(QWidget):
         volumes = [
             volume
             for volume in self._mounted_volumes()
-            if volume.isValid()
-            and volume.isReady()
-            and volume.bytesTotal() > 0
+            if ((volume.isValid() and volume.isReady() and volume.bytesTotal() > 0)
+                or self.is_removable_windows_volume(volume.rootPath()))
             and self._is_user_visible_volume(volume, disk_image_mounts)
         ]
         if sys.platform.startswith("linux"):
@@ -129,7 +128,7 @@ class DriveReportWidget(QWidget):
             usage = QProgressBar(self.table)
             usage.setRange(0, 100)
             usage.setValue(used_percent)
-            usage.setFormat(f"{used_percent}% used")
+            usage.setFormat(f"{used_percent}% used" if total else "Unavailable")
             usage.setTextVisible(True)
             usage.setFixedHeight(22)
             usage.setStyleSheet(
@@ -146,8 +145,8 @@ class DriveReportWidget(QWidget):
             self.table.setCellWidget(row, 1, usage)
 
             for column, value in (
-                (2, self._format_size(available)),
-                (3, self._format_size(total)),
+                (2, self._format_size(available) if total else "Unknown"),
+                (3, self._format_size(total) if total else "Unknown"),
             ):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(
@@ -291,6 +290,105 @@ class DriveReportWidget(QWidget):
             device = os.path.realpath(bytes(volume.device()).decode("utf-8", errors="replace"))
             return (device_labels or {}).get(device) or volume.displayName().strip() or root_path
         return volume.displayName().strip() or root_path
+
+    @staticmethod
+    def is_removable_windows_volume(path: str) -> bool:
+        if sys.platform != "win32":
+            return False
+        root = path.replace("\\", "/")
+        if len(root) != 3 or not root[0].isascii() or not root[0].isalpha() or root[1:] != ":/":
+            return False
+        import ctypes
+
+        return ctypes.windll.kernel32.GetDriveTypeW(root.replace("/", "\\")) == 2
+
+    @staticmethod
+    def eject_windows_volume(path: str) -> None:
+        if not DriveReportWidget.is_removable_windows_volume(path):
+            raise OSError("Only a removable Windows drive root can be ejected.")
+        letter = path[0].upper()
+        script = (
+            "$ErrorActionPreference = 'Stop'; "
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            f'Get-CimInstance Win32_LogicalDisk -Filter "DeviceID=\'{letter}:\'" | '
+            "Get-CimAssociatedInstance -Association Win32_LogicalDiskToPartition | "
+            "Get-CimAssociatedInstance -Association Win32_DiskDriveToDiskPartition | "
+            "Select-Object -ExpandProperty PNPDeviceID | ConvertTo-Json -Compress"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            device_id = json.loads(result.stdout)
+        except ValueError as error:
+            raise OSError("Could not identify the removable drive's physical device.") from error
+        if not isinstance(device_id, str) or not device_id:
+            raise OSError("Could not uniquely identify the removable drive's physical device.")
+
+        import ctypes
+
+        cfgmgr32 = ctypes.WinDLL("cfgmgr32")
+        locate = cfgmgr32.CM_Locate_DevNodeW
+        locate.argtypes = [ctypes.POINTER(ctypes.c_uint32), ctypes.c_wchar_p, ctypes.c_uint32]
+        locate.restype = ctypes.c_uint32
+        eject = cfgmgr32.CM_Request_Device_EjectW
+        eject.argtypes = [
+            ctypes.c_uint32, ctypes.POINTER(ctypes.c_int), ctypes.c_wchar_p,
+            ctypes.c_uint32, ctypes.c_uint32,
+        ]
+        eject.restype = ctypes.c_uint32
+        device = ctypes.c_uint32()
+        code = locate(ctypes.byref(device), device_id, 0)
+        if code:
+            raise OSError(f"Could not locate the removable device (Windows code 0x{code:02X}).")
+        target = DriveReportWidget._windows_eject_target(cfgmgr32, device.value)
+        veto = ctypes.c_int()
+        veto_name = ctypes.create_unicode_buffer(260)
+        code = eject(target, ctypes.byref(veto), veto_name, len(veto_name), 0)
+        if code:
+            detail = f": {veto_name.value}" if veto_name.value else ""
+            raise OSError(
+                "Windows could not safely eject the drive. Close files and applications "
+                f"using it and try again (code 0x{code:02X}, veto {veto.value}){detail}"
+            )
+
+    @staticmethod
+    def _windows_eject_target(cfgmgr32, device: int) -> int:
+        import ctypes
+
+        get_property = cfgmgr32.CM_Get_DevNode_Registry_PropertyW
+        get_property.argtypes = [
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32,
+        ]
+        get_property.restype = ctypes.c_uint32
+        get_parent = cfgmgr32.CM_Get_Parent
+        get_parent.argtypes = [ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32, ctypes.c_uint32]
+        get_parent.restype = ctypes.c_uint32
+        visited: set[int] = set()
+        while device not in visited:
+            visited.add(device)
+            capabilities = ctypes.c_uint32()
+            length = ctypes.c_uint32(ctypes.sizeof(capabilities))
+            code = get_property(
+                device, 0x10, None, ctypes.byref(capabilities), ctypes.byref(length), 0
+            )
+            if code:
+                raise OSError(f"Could not read device removal capabilities (Windows code 0x{code:02X}).")
+            if capabilities.value & 0x04:
+                return device
+            parent = ctypes.c_uint32()
+            code = get_parent(ctypes.byref(parent), device, 0)
+            if code:
+                break
+            device = parent.value
+        raise OSError("Could not find a safely removable parent device.")
 
     @staticmethod
     def is_removable_macos_volume(path: str) -> bool:

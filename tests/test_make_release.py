@@ -6,6 +6,22 @@ import unittest
 from pathlib import Path
 
 
+@unittest.skipIf(shutil.which("make") is None, "Requires make")
+class WindowsReleaseBuildTests(unittest.TestCase):
+    def test_windows_build_cleans_pyinstaller_cache(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["make", "--dry-run", "--no-print-directory", "HOST_OS=Windows",
+             "OS=Windows_NT", "PYTHON=python", "build-windows"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--clean", result.stdout)
+
+
 @unittest.skipIf(os.name == "nt" or shutil.which("make") is None, "Requires POSIX make")
 class MakeReleaseTests(unittest.TestCase):
     def setUp(self):

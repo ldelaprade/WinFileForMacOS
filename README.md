@@ -40,6 +40,7 @@ A classic Windows-inspired file manager for macOS, Windows, and Linux, built wit
 - SVN context menu: working-copy status, diffs, add selected items, commit selected items, and update
 - Custom tools under **More...** in the right-pane context menu, with persistent name/command configuration
 - Windows subst drives appear under Local Machine and Drives with their target paths. Right-click a mapped drive and choose **Unsubst...** to remove it. Answering **Yes** to **Drop content as well?** permanently deletes the original target folder's contents before unmapping; **No** preserves them, and **Cancel** makes no changes.
+- Removable Windows drives appear even when their capacity is unavailable. Press **F5** after inserting a USB drive, then right-click it under Local Machine or Drives and choose **Eject Drive** for safe removal. Close files or applications using the drive if Windows refuses to eject it. Ejecting removes the physical device, including its other partitions. On macOS, the corresponding action is **Unmount Drive**.
 
 ## Requirements
 

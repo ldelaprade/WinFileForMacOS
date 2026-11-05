@@ -286,13 +286,16 @@ class _DiskUnmountWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            subprocess.run(
-                ["diskutil", "unmount", self.path],
-                capture_output=True,
-                check=True,
-                text=True,
-                timeout=15,
-            )
+            if sys.platform == "win32":
+                DriveReportWidget.eject_windows_volume(self.path)
+            else:
+                subprocess.run(
+                    ["diskutil", "unmount", self.path],
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                    timeout=15,
+                )
         except (OSError, subprocess.SubprocessError) as error:
             detail = getattr(error, "stderr", None) or str(error)
             self.signals.completed.emit(detail, False)
@@ -634,6 +637,8 @@ class ExplorerWindow(QMainWindow):
         self.list_view.selectionModel().selectionChanged.connect(
             lambda *_: self._update_status()
         )
+        if sys.platform == "win32":
+            self.fs_model.rowsInserted.connect(self._on_file_rows_inserted)
         self.content_stack.addWidget(self.list_view)
 
         self.drive_report = DriveReportWidget(self.content_stack)
@@ -1810,12 +1815,20 @@ class ExplorerWindow(QMainWindow):
         menu.exec(self.this_pc_view.viewport().mapToGlobal(pos))
 
     def _add_unmount_drive_action(self, menu: QMenu, path: str) -> None:
-        if DriveReportWidget.is_removable_macos_volume(path):
-            menu.addAction("Unmount Drive", lambda target_path=path: self._unmount_drive(target_path))
+        if (DriveReportWidget.is_removable_windows_volume(path)
+                or DriveReportWidget.is_removable_macos_volume(path)):
+            label = "Eject Drive" if sys.platform == "win32" else "Unmount Drive"
+            action = menu.addAction(label, lambda target_path=path: self._unmount_drive(target_path))
+            action.setEnabled(self._disk_unmount_worker is None)
 
     def _unmount_drive(self, path: str) -> None:
         if self._disk_unmount_worker is not None:
             return
+        if sys.platform == "win32":
+            current = self.current_path().replace("\\", "/").casefold()
+            root = path.replace("\\", "/").casefold()
+            if current.rstrip("/") == root.rstrip("/") or current.startswith(root):
+                self.navigate_to(str(Path.home()), record_history=True)
         worker = _DiskUnmountWorker(path)
         worker.signals.completed.connect(self._on_disk_unmount_completed)
         self._disk_unmount_worker = worker
@@ -1824,15 +1837,18 @@ class ExplorerWindow(QMainWindow):
     def _on_disk_unmount_completed(self, result: object, success: bool) -> None:
         worker = self._disk_unmount_worker
         self._disk_unmount_worker = None
+        title = "Eject Drive" if sys.platform == "win32" else "Unmount Drive"
         if not success or worker is None:
             QMessageBox.warning(
                 self,
-                "Unmount Drive",
-                f"Could not unmount the drive:\n{worker.path if worker else ''}\n\n{result}",
+                title,
+                f"Could not {'eject' if sys.platform == 'win32' else 'unmount'} the drive:\n"
+                f"{worker.path if worker else ''}\n\n{result}",
             )
             return
         self.refresh()
-        self.status.showMessage(f"Unmounted {Path(worker.path).name or worker.path}", 3000)
+        verb = "Ejected" if sys.platform == "win32" else "Unmounted"
+        self.status.showMessage(f"{verb} {Path(worker.path).name or worker.path}", 3000)
 
     def _show_drive_report_context_menu(self, pos: QPoint) -> None:
         item = self.drive_report.table.itemAt(pos)
@@ -1842,6 +1858,7 @@ class ExplorerWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Browse", lambda: self.navigate_to(path, record_history=True))
         self._add_unsubst_action(menu, path)
+        self._add_unmount_drive_action(menu, path)
         self._add_pack_folder_action(menu, path)
         menu.exec(self.drive_report.table.viewport().mapToGlobal(pos))
 
@@ -2285,7 +2302,11 @@ class ExplorerWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(normalized))
             return
 
-        self.fs_model.setRootPath(normalized)
+        if (sys.platform == "win32"
+                and DriveReportWidget.is_removable_windows_volume(Path(normalized).anchor)):
+            self._rescan_directory(normalized)
+        else:
+            self.fs_model.setRootPath(normalized)
         root_index = self.fs_model.index(normalized)
         if not root_index.isValid():
             QMessageBox.warning(self, "Invalid path", f"Folder not found:\n{normalized}")
@@ -2327,7 +2348,9 @@ class ExplorerWindow(QMainWindow):
         """Force the model to re-list the current folder (needed when Qt's own watcher is off)."""
         if self._dir_watcher is None or self._showing_this_pc:
             return
-        current = self.current_path()
+        self._rescan_directory(self.current_path())
+
+    def _rescan_directory(self, current: str) -> None:
         # An always-empty folder keeps the round trip cheap (listing the parent can be slow).
         away = os.path.join(QDir.tempPath(), "RetroFile-rescan")
         os.makedirs(away, exist_ok=True)
@@ -2354,15 +2377,29 @@ class ExplorerWindow(QMainWindow):
             self._auto_resize_name_column()
             self._update_status()
 
+    def _on_file_rows_inserted(self, parent: QModelIndex, _first: int, _last: int) -> None:
+        if not self._showing_this_pc and parent == self.list_view.rootIndex():
+            self._apply_file_visibility(self.current_path())
+
     def _apply_file_visibility(self, path: str) -> None:
         root_index = self.list_view.rootIndex()
         if not root_index.isValid():
             return
 
+        enumerated_names: set[str] | None = None
+        if sys.platform == "win32" and not is_network_path(path):
+            try:
+                with os.scandir(path) as entries:
+                    enumerated_names = {entry.name.casefold() for entry in entries}
+            except OSError:
+                pass
+
         for row in range(self.fs_model.rowCount(root_index)):
             index = self.fs_model.index(row, 0, root_index)
             name = self.fs_model.fileName(index)
-            is_hidden = self._is_hidden_path(self.fs_model.filePath(index), name)
+            is_hidden = (
+                enumerated_names is not None and name.casefold() not in enumerated_names
+            ) or self._is_hidden_path(self.fs_model.filePath(index), name)
             self.list_view.setRowHidden(row, root_index, is_hidden)
 
     def _is_hidden_path(self, path: str, name: str | None = None) -> bool:
@@ -2914,7 +2951,10 @@ class ExplorerWindow(QMainWindow):
         if self._view_mode == "thumbnail":
             return []
         selection = self.list_view.selectionModel().selectedRows()
-        return [index for index in selection if index.isValid()]
+        return [
+            index for index in selection
+            if index.isValid() and not self.list_view.isRowHidden(index.row(), index.parent())
+        ]
 
     def selected_paths(self) -> list[str]:
         if self._showing_this_pc:

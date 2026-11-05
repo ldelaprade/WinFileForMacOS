@@ -15,6 +15,28 @@ class SubstitutedDriveTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_removable_drive_with_unavailable_qt_metadata_is_visible(self):
+        volume = Mock()
+        volume.isValid.return_value = False
+        volume.isReady.return_value = False
+        volume.bytesTotal.return_value = -1
+        volume.bytesAvailable.return_value = -1
+        volume.rootPath.return_value = "J:/"
+        volume.device.return_value = b""
+        volume.fileSystemType.return_value = b""
+        with patch("src.drive_report.sys.platform", "win32"), \
+                patch.object(DriveReportWidget, "_mounted_volumes", return_value=[volume]), \
+                patch("src.drive_report.list_substituted_drives", return_value={}), \
+                patch("ctypes.windll", create=True) as windll:
+            windll.kernel32.GetDriveTypeW.return_value = 2
+            widget = DriveReportWidget()
+            try:
+                self.assertEqual(widget.drive_entries, [("J:", "J:/")])
+                self.assertEqual(widget.table.item(0, 3).text(), "Unknown")
+            finally:
+                widget.close()
+                widget.deleteLater()
+
     def test_subst_drives_are_added_labeled_and_not_duplicated(self):
         volume = Mock()
         volume.isValid.return_value = True
@@ -41,6 +63,102 @@ class SubstitutedDriveTests(unittest.TestCase):
             finally:
                 widget.close()
                 widget.deleteLater()
+
+
+class WindowsEjectTests(unittest.TestCase):
+    def test_only_removable_drive_roots_are_ejectable(self):
+        with patch("src.drive_report.sys.platform", "win32"), \
+                patch("ctypes.windll", create=True) as windll:
+            windll.kernel32.GetDriveTypeW.return_value = 2
+            for path in ("J:/", "j:\\"):
+                self.assertTrue(DriveReportWidget.is_removable_windows_volume(path))
+            for path in ("J:/folder", "//server/share", "J:", "/", "1:/"):
+                self.assertFalse(DriveReportWidget.is_removable_windows_volume(path))
+            windll.kernel32.GetDriveTypeW.return_value = 3
+            self.assertFalse(DriveReportWidget.is_removable_windows_volume("C:/"))
+
+    def test_safe_eject_reports_success_and_windows_veto(self):
+        for code in (0, 0x17):
+            with self.subTest(code=code), \
+                    patch.object(DriveReportWidget, "is_removable_windows_volume", return_value=True), \
+                    patch("src.drive_report.subprocess.run", return_value=SimpleNamespace(
+                        stdout=json.dumps("USBSTOR\\DISK\\USB123")
+                    )) as run, patch("ctypes.WinDLL", create=True) as library:
+                native = library.return_value
+                native.CM_Locate_DevNodeW.return_value = 0
+                def capabilities(_device, _property, _type, buffer, _length, _flags):
+                    buffer._obj.value = 4
+                    return 0
+                native.CM_Get_DevNode_Registry_PropertyW.side_effect = capabilities
+                native.CM_Request_Device_EjectW.return_value = code
+                if code:
+                    with self.assertRaisesRegex(OSError, "safely eject"):
+                        DriveReportWidget.eject_windows_volume("J:/")
+                else:
+                    DriveReportWidget.eject_windows_volume("J:/")
+                self.assertIn("DeviceID='J:'", run.call_args.args[0][-1])
+                native.CM_Request_Device_EjectW.assert_called_once()
+                self.assertEqual(native.CM_Locate_DevNodeW.call_args.args[1],
+                                 "USBSTOR\\DISK\\USB123")
+
+    def test_unidentified_device_is_never_ejected(self):
+        for output in ("", "null", '["disk1","disk2"]'):
+            with self.subTest(output=output), \
+                    patch.object(DriveReportWidget, "is_removable_windows_volume", return_value=True), \
+                    patch("src.drive_report.subprocess.run", return_value=SimpleNamespace(stdout=output)), \
+                    patch("ctypes.WinDLL", create=True) as library:
+                with self.assertRaises(OSError):
+                    DriveReportWidget.eject_windows_volume("J:/")
+                library.assert_not_called()
+
+    def test_eject_targets_removable_usb_parent_not_nonremovable_disk(self):
+        with patch.object(DriveReportWidget, "is_removable_windows_volume", return_value=True), \
+                patch("src.drive_report.subprocess.run", return_value=SimpleNamespace(
+                    stdout=json.dumps("USBSTOR\\DISK\\USB123")
+                )), patch("ctypes.WinDLL", create=True) as library:
+            native = library.return_value
+
+            def locate(device, _identity, _flags):
+                device._obj.value = 10
+                return 0
+
+            def capabilities(device, _property, _type, buffer, _length, _flags):
+                buffer._obj.value = 4 if device == 20 else 0
+                return 0
+
+            def parent(device, child, _flags):
+                self.assertEqual(child, 10)
+                device._obj.value = 20
+                return 0
+
+            native.CM_Locate_DevNodeW.side_effect = locate
+            native.CM_Get_DevNode_Registry_PropertyW.side_effect = capabilities
+            native.CM_Get_Parent.side_effect = parent
+            native.CM_Request_Device_EjectW.return_value = 0
+            DriveReportWidget.eject_windows_volume("J:/")
+            self.assertEqual(native.CM_Request_Device_EjectW.call_args.args[0], 20)
+
+    def test_fixed_drive_is_never_ejected(self):
+        with patch.object(DriveReportWidget, "is_removable_windows_volume", return_value=False), \
+                patch("src.drive_report.subprocess.run") as run:
+            with self.assertRaises(OSError):
+                DriveReportWidget.eject_windows_volume("C:/")
+            run.assert_not_called()
+
+    def test_unresolved_removal_capabilities_never_request_eject(self):
+        for property_code, parent_code in ((0x25, 0), (0, 0x0D), (0, 0)):
+            with self.subTest(property_code=property_code, parent_code=parent_code), \
+                    patch.object(DriveReportWidget, "is_removable_windows_volume", return_value=True), \
+                    patch("src.drive_report.subprocess.run", return_value=SimpleNamespace(
+                        stdout=json.dumps("USBSTOR\\DISK\\USB123")
+                    )), patch("ctypes.WinDLL", create=True) as library:
+                native = library.return_value
+                native.CM_Locate_DevNodeW.return_value = 0
+                native.CM_Get_DevNode_Registry_PropertyW.return_value = property_code
+                native.CM_Get_Parent.return_value = parent_code
+                with self.assertRaises(OSError):
+                    DriveReportWidget.eject_windows_volume("J:/")
+                native.CM_Request_Device_EjectW.assert_not_called()
 
 
 class LinuxVolumeVisibilityTests(unittest.TestCase):

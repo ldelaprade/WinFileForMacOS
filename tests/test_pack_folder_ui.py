@@ -80,10 +80,12 @@ class PackFolderUiTests(unittest.TestCase):
         with patch("src.file_explorer.QMenu"):
             ExplorerWindow._show_drive_report_context_menu(window, QPoint())
         self.assertEqual(window._add_pack_folder_action.call_args.args[1], "/usb")
+        self.assertEqual(window._add_unmount_drive_action.call_args.args[1], "/usb")
         window.this_pc_view.itemAt.return_value.data.return_value = "/folder"
         with patch("src.file_explorer.QMenu"):
             ExplorerWindow._show_file_system_context_menu(window, QPoint())
         self.assertEqual(window._add_pack_folder_action.call_args.args[1], "/folder")
+        self.assertEqual(window._add_unmount_drive_action.call_args.args[1], "/folder")
 
     def test_main_context_offers_pack_for_folder_not_file(self):
         for folder in (False, True):
