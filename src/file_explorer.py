@@ -1736,7 +1736,7 @@ class ExplorerWindow(QMainWindow):
             if isinstance(path, str) and path:
                 menu.addSeparator()
                 menu.addAction("Open", lambda current_path=path: self._open_favorite(current_path))
-                menu.addAction("Remove", lambda current_path=path: self._remove_favorite_path(current_path))
+                menu.addAction("Remove from favorites", lambda current_path=path: self._remove_favorite_path(current_path))
                 menu.addSeparator()
                 if path in self._ftp_shares:
                     menu.addAction("Stop FTP Share", lambda current_path=path: self._stop_ftp_share(current_path))

@@ -1,6 +1,7 @@
 import stat
 import json
 import plistlib
+import struct
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -22,16 +23,19 @@ class SubstitutedDriveTests(unittest.TestCase):
         volume.bytesTotal.return_value = -1
         volume.bytesAvailable.return_value = -1
         volume.rootPath.return_value = "J:/"
+        volume.name.return_value = ""
+        volume.isReadOnly.return_value = False
         volume.device.return_value = b""
         volume.fileSystemType.return_value = b""
         with patch("src.drive_report.sys.platform", "win32"), \
                 patch.object(DriveReportWidget, "_mounted_volumes", return_value=[volume]), \
+                patch.object(DriveReportWidget, "_windows_device_details", return_value={}), \
                 patch("src.drive_report.list_substituted_drives", return_value={}), \
                 patch("ctypes.windll", create=True) as windll:
             windll.kernel32.GetDriveTypeW.return_value = 2
             widget = DriveReportWidget()
             try:
-                self.assertEqual(widget.drive_entries, [("J:", "J:/")])
+                self.assertEqual(widget.drive_entries, [("J: (Removable drive)", "J:/")])
                 self.assertEqual(widget.table.item(0, 3).text(), "Unknown")
             finally:
                 widget.close()
@@ -44,12 +48,15 @@ class SubstitutedDriveTests(unittest.TestCase):
         volume.bytesTotal.return_value = 100
         volume.bytesAvailable.return_value = 60
         volume.rootPath.return_value = "S:/"
+        volume.name.return_value = ""
+        volume.isReadOnly.return_value = False
         volume.device.return_value = b"local"
         volume.fileSystemType.return_value = b"NTFS"
         storage = Mock()
         storage.mountedVolumes.return_value = [volume]
         storage.return_value = volume
         with patch("src.drive_report.sys.platform", "win32"), \
+            patch.object(DriveReportWidget, "_mounted_volumes", return_value=[volume]), \
                 patch("src.drive_report.QStorageInfo", storage), \
                 patch("src.drive_report.list_substituted_drives",
                       return_value={"S": r"C:\source", "T": r"C:\other"}):
@@ -63,6 +70,82 @@ class SubstitutedDriveTests(unittest.TestCase):
             finally:
                 widget.close()
                 widget.deleteLater()
+
+
+class WindowsVolumeLabelTests(unittest.TestCase):
+    def test_device_descriptor_reports_usb_and_model_and_closes_handle(self):
+        import ctypes
+
+        data = bytearray(80)
+        struct.pack_into("<I", data, 12, 36)
+        struct.pack_into("<I", data, 16, 44)
+        struct.pack_into("<I", data, 28, 7)
+        data[36:44] = b"Vendor\0\0"
+        data[44:53] = b"USB Disk\0"
+
+        def query(_handle, _code, _query, _query_size, buffer, _size, returned, _overlapped):
+            ctypes.memmove(buffer, bytes(data), len(data))
+            returned._obj.value = len(data)
+            return True
+
+        with patch("src.drive_report.sys.platform", "win32"), \
+                patch("ctypes.windll", create=True) as windll:
+            kernel = windll.kernel32
+            kernel.CreateFileW.return_value = 42
+            kernel.DeviceIoControl.side_effect = query
+            self.assertEqual(DriveReportWidget._windows_device_details("J:/"),
+                             {"bus": "USB", "model": "Vendor USB Disk"})
+            self.assertEqual(kernel.CreateFileW.call_args.args[:2], (r"\\.\J:", 0))
+            self.assertEqual(kernel.DeviceIoControl.call_args.args[1], 0x2D1400)
+            kernel.CloseHandle.assert_called_once_with(42)
+
+    def test_unavailable_or_short_device_descriptor_is_optional(self):
+        for handle, success, length in ((None, False, 0), (42, False, 0), (42, True, 16)):
+            with self.subTest(handle=handle, success=success, length=length), \
+                    patch("src.drive_report.sys.platform", "win32"), \
+                    patch("ctypes.windll", create=True) as windll:
+                kernel = windll.kernel32
+                kernel.CreateFileW.return_value = handle
+
+                def query(_handle, _code, _query, _query_size, _buffer, _size, returned, _overlapped):
+                    returned._obj.value = length
+                    return success
+
+                kernel.DeviceIoControl.side_effect = query
+                self.assertEqual(DriveReportWidget._windows_device_details("J:/"), {})
+                self.assertEqual(kernel.CloseHandle.called, handle is not None)
+
+    def test_network_and_nonroot_paths_skip_device_query(self):
+        with patch("src.drive_report.sys.platform", "win32"), \
+                patch("ctypes.windll", create=True) as windll:
+            for path in ("//server/share", "J:/folder", "J:"):
+                self.assertEqual(DriveReportWidget._windows_device_details(path), {})
+            windll.kernel32.CreateFileW.assert_not_called()
+
+    def test_windows_labels_include_volume_name_bus_type_filesystem_and_read_only(self):
+        cases = [
+            (2, {"bus": "USB", "model": "Verbatim STORE N GO"}, "USB Key", b"exFAT", False,
+             "J: USB Key (USB removable drive, exFAT)"),
+            (3, {"bus": "NVMe"}, "System", b"NTFS", False,
+             "J: System (NVMe fixed drive, NTFS)"),
+            (3, {"bus": "USB"}, "Backup", b"NTFS", True,
+             "J: Backup (USB external drive, NTFS, read-only)"),
+            (5, {}, "Installer", b"UDF", True,
+             "J: Installer (CD/DVD drive, UDF, read-only)"),
+            (2, {}, "", b"", False, "J: (Removable drive)"),
+        ]
+        for drive_type, details, name, filesystem, read_only, expected in cases:
+            with self.subTest(expected=expected), patch("src.drive_report.sys.platform", "win32"), \
+                    patch("ctypes.windll", create=True) as windll, \
+                    patch.object(DriveReportWidget, "_windows_device_details", create=True,
+                                 return_value=details):
+                volume = Mock()
+                volume.rootPath.return_value = "J:/"
+                volume.name.return_value = name
+                volume.fileSystemType.return_value = filesystem
+                volume.isReadOnly.return_value = read_only
+                windll.kernel32.GetDriveTypeW.return_value = drive_type
+                self.assertEqual(DriveReportWidget._volume_label(volume), expected)
 
 
 class WindowsEjectTests(unittest.TestCase):

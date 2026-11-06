@@ -4,6 +4,7 @@ import plistlib
 import json
 import os
 import stat
+import struct
 import subprocess
 import sys
 from html import escape
@@ -285,11 +286,86 @@ class DriveReportWidget(QWidget):
     def _volume_label(volume: QStorageInfo, device_labels: dict[str, str] | None = None) -> str:
         root_path = volume.rootPath()
         if sys.platform == "win32":
-            return root_path.rstrip("\\/") or root_path
+            import ctypes
+
+            root = root_path.rstrip("\\/") or root_path
+            drive_type = ctypes.windll.kernel32.GetDriveTypeW(root_path.replace("/", "\\"))
+            kind = {
+                2: "Removable drive", 3: "Fixed drive", 4: "Network drive",
+                5: "CD/DVD drive", 6: "RAM disk",
+            }.get(drive_type, "Drive")
+            details = DriveReportWidget._windows_device_details(root_path) if drive_type in (2, 3) else {}
+            if details.get("bus") == "USB" and drive_type == 3:
+                kind = "USB external drive"
+            elif details.get("bus"):
+                kind = f"{details['bus']} {kind.lower()}"
+            name = volume.name().strip() or details.get("model", "")
+            title = f"{root} {name}" if name else root
+            description = [kind]
+            filesystem = bytes(volume.fileSystemType()).decode("utf-8", errors="replace").strip()
+            if filesystem:
+                description.append(filesystem)
+            if volume.isReadOnly():
+                description.append("read-only")
+            return f"{title} ({', '.join(description)})"
         if sys.platform.startswith("linux"):
             device = os.path.realpath(bytes(volume.device()).decode("utf-8", errors="replace"))
             return (device_labels or {}).get(device) or volume.displayName().strip() or root_path
         return volume.displayName().strip() or root_path
+
+    @staticmethod
+    def _windows_device_details(path: str) -> dict[str, str]:
+        root = path.replace("\\", "/")
+        if (sys.platform != "win32" or len(root) != 3 or root[1:] != ":/"
+                or not root[0].isascii() or not root[0].isalpha()):
+            return {}
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        open_device = kernel32.CreateFileW
+        open_device.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        open_device.restype = wintypes.HANDLE
+        query_device = kernel32.DeviceIoControl
+        query_device.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+        ]
+        query_device.restype = wintypes.BOOL
+        close_device = kernel32.CloseHandle
+        close_device.argtypes = [wintypes.HANDLE]
+        close_device.restype = wintypes.BOOL
+        handle = open_device(f"\\\\.\\{root[:2]}", 0, 7, None, 3, 0, None)
+        if handle in (None, ctypes.c_void_p(-1).value):
+            return {}
+        try:
+            query = (ctypes.c_uint32 * 3)(0, 0, 0)
+            buffer = ctypes.create_string_buffer(4096)
+            returned = wintypes.DWORD()
+            if not query_device(
+                handle, 0x2D1400, query, ctypes.sizeof(query), buffer,
+                ctypes.sizeof(buffer), ctypes.byref(returned), None,
+            ) or returned.value < 36:
+                return {}
+            data = buffer.raw[:returned.value]
+            bus_type = struct.unpack_from("<I", data, 28)[0]
+            bus = {
+                1: "SCSI", 3: "ATA", 7: "USB", 9: "iSCSI", 11: "SATA",
+                14: "Virtual", 15: "Virtual", 16: "Storage Spaces", 17: "NVMe", 19: "UFS",
+            }.get(bus_type, "")
+            model_parts = []
+            for position in (12, 16):
+                offset = struct.unpack_from("<I", data, position)[0]
+                if 36 <= offset < len(data):
+                    value = data[offset:].split(b"\0", 1)[0].decode("ascii", errors="replace").strip()
+                    if value and value not in model_parts:
+                        model_parts.append(value)
+            return {"bus": bus, "model": " ".join(model_parts)}
+        finally:
+            close_device(handle)
 
     @staticmethod
     def is_removable_windows_volume(path: str) -> bool:
