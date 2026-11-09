@@ -668,7 +668,7 @@ class ExplorerWindow(QMainWindow):
         self.content_stack.addWidget(self.drive_report)
         self._refresh_machine_tree()
 
-        self.thumbnail_view = FileDragListWidget(self.splitter)
+        self.thumbnail_view = FileDragListWidget(self.content_stack)
         self.thumbnail_view.setViewMode(QListWidget.IconMode)
         self.thumbnail_view.setResizeMode(QListWidget.Adjust)
         self.thumbnail_view.setIconSize(QSize(96, 96))
@@ -688,13 +688,12 @@ class ExplorerWindow(QMainWindow):
         self.thumbnail_view.selectionModel().selectionChanged.connect(
             lambda *_: self._update_status()
         )
-        self.thumbnail_view.hide()
+        self.content_stack.addWidget(self.thumbnail_view)
         self.content_stack.setCurrentWidget(self.list_view)
 
-        self.splitter.setSizes([300, 900, 0])
+        self.splitter.setSizes([300, 900])
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setStretchFactor(2, 1)
         left_panel.setSizes([170, 360, 170])
         left_panel.setStretchFactor(0, 0)
         left_panel.setStretchFactor(1, 0)
@@ -1051,14 +1050,12 @@ class ExplorerWindow(QMainWindow):
         self.drive_report.refresh_drives()
         self._refresh_machine_tree()
         self.content_stack.setCurrentWidget(self.drive_report)
-        self.thumbnail_view.hide()
         self.this_pc_view.setMaximumHeight(16777215)
         self.this_pc_view.setCurrentItem(self.this_pc_item)
         self.view_mode_widget.setEnabled(False)
         self.address_bar.setText(self._computer_name)
         if record_history:
             self.navigation_history.record(self._THIS_PC_HISTORY_ENTRY)
-        self._ensure_list_width()
         self._update_nav_actions()
         self._update_status()
 
@@ -2344,7 +2341,6 @@ class ExplorerWindow(QMainWindow):
             return
 
         self._showing_this_pc = False
-        self.content_stack.setCurrentWidget(self.list_view)
         self.view_mode_widget.setEnabled(True)
         self._select_machine_path(normalized)
         self.list_view.setRootIndex(root_index)
@@ -2355,11 +2351,9 @@ class ExplorerWindow(QMainWindow):
 
         if self._view_mode == "thumbnail":
             self._populate_thumbnail_view(normalized)
-            self.thumbnail_view.show()
-            self._ensure_thumbnail_width()
+            self.content_stack.setCurrentWidget(self.thumbnail_view)
         else:
-            self.thumbnail_view.hide()
-            self._ensure_list_width()
+            self.content_stack.setCurrentWidget(self.list_view)
 
         if record_history:
             self.navigation_history.record(normalized)
@@ -4011,14 +4005,10 @@ class ExplorerWindow(QMainWindow):
         if mode == "thumbnail":
             self._view_mode = "thumbnail"
             self._populate_thumbnail_view(self.current_path())
-            self.content_stack.setCurrentWidget(self.list_view)
-            self.thumbnail_view.show()
-            self._ensure_thumbnail_width()
+            self.content_stack.setCurrentWidget(self.thumbnail_view)
         else:
             self._view_mode = "list"
-            self.thumbnail_view.hide()
             self.content_stack.setCurrentWidget(self.list_view)
-            self._ensure_list_width()
 
         self._update_view_mode_buttons()
         self._update_status()
@@ -4031,25 +4021,6 @@ class ExplorerWindow(QMainWindow):
     def toggle_view_mode(self) -> None:
         target_mode = "thumbnail" if self._view_mode == "list" else "list"
         self.set_view_mode(target_mode)
-
-    def _ensure_thumbnail_width(self) -> None:
-        def apply_sizes() -> None:
-            total = max(1, self.splitter.width())
-            tree = max(220, int(total * 0.25))
-            content = max(300, total - tree)
-            self.splitter.setSizes([tree, 0, content])
-
-        QTimer.singleShot(0, apply_sizes)
-
-    def _ensure_list_width(self) -> None:
-        def apply_sizes() -> None:
-            total = max(1, self.splitter.width())
-            tree = max(220, int(total * 0.25))
-            content = max(300, total - tree)
-            self.splitter.setSizes([tree, content, 0])
-
-        QTimer.singleShot(0, apply_sizes)
-
 
 def _set_application_icon(app: QApplication) -> None:
     if sys.platform == "win32":

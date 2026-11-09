@@ -18,6 +18,43 @@ from src.file_explorer import ExplorerWindow, _DiskUnmountWorker, _VfsUnmountWor
 
 
 class FileExplorerOpenTests(unittest.TestCase):
+    def test_view_modes_share_one_splitter_pane_and_preserve_divider(self):
+        app = QApplication.instance() or QApplication([])
+        with patch.object(ExplorerWindow, "_load_favorite_paths", return_value=[]), \
+                patch.object(ExplorerWindow, "_save_favorite_paths"), \
+                patch.object(ExplorerWindow, "_refresh_machine_tree"), \
+                patch.object(ExplorerWindow, "_setup_menus"), \
+                patch.object(ExplorerWindow, "_setup_toolbar"), \
+                patch.object(ExplorerWindow, "_setup_statusbar"), \
+                patch.object(ExplorerWindow, "_setup_shortcuts"), \
+                patch.object(ExplorerWindow, "navigate_to"), \
+                patch.object(ExplorerWindow, "_populate_thumbnail_view"), \
+                patch.object(ExplorerWindow, "_update_status"):
+            window = ExplorerWindow()
+            try:
+                window.show()
+                app.processEvents()
+                self.assertEqual(window.splitter.count(), 2)
+                self.assertEqual(window.content_stack.indexOf(window.thumbnail_view), 2)
+                window.splitter.setSizes([380, 820])
+                sizes = window.splitter.sizes()
+                for mode in ("thumbnail", "list", "thumbnail"):
+                    window.set_view_mode(mode)
+                    app.processEvents()
+                    active = window.thumbnail_view if mode == "thumbnail" else window.list_view
+                    inactive = window.list_view if mode == "thumbnail" else window.thumbnail_view
+                    self.assertIs(window.content_stack.currentWidget(), active)
+                    self.assertTrue(active.isVisible())
+                    self.assertFalse(inactive.isVisible())
+                    self.assertEqual(window.splitter.sizes(), sizes)
+                    window.splitter.moveSplitter(450, 1)
+                    app.processEvents()
+                    self.assertFalse(inactive.isVisible())
+                    self.assertTrue(active.isVisible())
+                    sizes = window.splitter.sizes()
+            finally:
+                window.close()
+
     def test_listing_diagnostics_reports_names_without_changing_contents(self):
         from src.main import write_listing_diagnostics
 
