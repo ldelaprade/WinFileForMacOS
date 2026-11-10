@@ -43,6 +43,29 @@ class GitRepositoryStatus:
     branches: GitBranchInfo
 
 
+@dataclass(frozen=True)
+class GitIconStatus:
+    root: str
+    paths: dict[str, str]
+    branch: str | None = None
+
+    def status_for(self, path: str) -> str | None:
+        try:
+            relative = Path(os.path.abspath(path)).relative_to(self.root)
+        except ValueError:
+            return None
+        if ".git" in relative.parts:
+            return None
+        name = relative.as_posix()
+        if name in self.paths:
+            return self.paths[name]
+        for parent in relative.parents:
+            inherited = self.paths.get(parent.as_posix())
+            if inherited in {"ignored", "untracked"}:
+                return inherited
+        return None
+
+
 class GitOperations:
     def __init__(self, directory: str) -> None:
         self.directory = Path(directory).absolute()
@@ -159,6 +182,59 @@ class GitOperations:
             raise GitOperationError(error.stderr.strip() or str(error)) from error
         except OSError as error:
             raise GitOperationError(str(error)) from error
+
+    def icon_status(self) -> GitIconStatus:
+        with Repo(self.directory, search_parent_directories=True) as repository:
+            if repository.bare or repository.working_tree_dir is None:
+                raise GitOperationError("A working-tree repository is required.")
+            priorities = {
+                "clean": 0, "ignored": 1, "untracked": 2, "added": 3,
+                "modified": 4, "deleted": 5, "conflicted": 6,
+            }
+            statuses: dict[str, str] = {".": "clean"}
+
+            def include(name: str, status: str) -> None:
+                relative = Path(name.rstrip("/"))
+                entries = (relative,) if status == "ignored" else (relative, *relative.parents)
+                for entry in entries:
+                    key = entry.as_posix()
+                    previous = statuses.get(key)
+                    if previous is None or priorities[status] > priorities[previous]:
+                        statuses[key] = status
+
+            with repository.git.custom_environment(GIT_OPTIONAL_LOCKS="0"):
+                tracked = repository.git.ls_files(
+                    "--cached", "-z", **self._timeout_options(30)
+                )
+                for name in tracked.split("\0"):
+                    if name:
+                        include(name, "clean")
+                records = iter(repository.git.status(
+                    "--porcelain=v1", "-z", "--ignored=matching",
+                    untracked_files="all", **self._timeout_options(30),
+                ).split("\0"))
+                for record in records:
+                    if not record:
+                        continue
+                    flags, name = record[:2], record[3:]
+                    original = next(records) if "R" in flags or "C" in flags else None
+                    if flags == "!!":
+                        status = "ignored"
+                    elif flags == "??":
+                        status = "untracked"
+                    elif "U" in flags or flags in {"AA", "DD"}:
+                        status = "conflicted"
+                    elif "D" in flags:
+                        status = "deleted"
+                    elif flags == "A ":
+                        status = "added"
+                    else:
+                        status = "modified"
+                    include(name, status)
+                    if original:
+                        include(original, "modified")
+            branch = None if repository.head.is_detached else repository.active_branch.name
+            return GitIconStatus(repository.working_tree_dir, statuses, branch)
 
     def clone(self, url: str, destination: str) -> str:
         url = url.strip()

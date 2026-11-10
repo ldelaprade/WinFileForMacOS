@@ -151,6 +151,7 @@ from .folder_archive import (
 )
 from .thumbnail_previews import ThumbnailPreviewProvider
 from .ui_theme import XPIconProvider, xp_stylesheet
+from .git_overlays import GitOverlayController, git_repository_icon
 
 if TYPE_CHECKING:
     from .git_operations import GitChanges
@@ -487,6 +488,13 @@ class ExplorerWindow(QMainWindow):
         self._setup_toolbar()
         self._setup_statusbar()
         self._setup_shortcuts()
+        self.git_overlays = GitOverlayController(
+            lambda: "" if self._showing_this_pc or is_network_path(self.current_path())
+            else self.current_path(), self,
+        )
+        self.git_overlays.snapshot_changed.connect(self._update_git_repository_indicator)
+        for view in (self.list_view, self.thumbnail_view, self.favorites_view, self.this_pc_view):
+            self.git_overlays.attach(view)
 
         main_disk_root = os.environ.get("SystemDrive", "C:") + "\\" if os.name == "nt" else "/"
         if initial_path and is_network_path(initial_path):
@@ -857,7 +865,26 @@ class ExplorerWindow(QMainWindow):
     def _setup_statusbar(self) -> None:
         self.status = QStatusBar(self)
         self.setStatusBar(self.status)
+        self.git_status_label = QLabel(self.status)
+        self.git_status_label.setTextFormat(Qt.PlainText)
+        self.git_status_label.setStyleSheet("color: #207d3c; font-weight: bold; padding: 0 6px;")
+        self.git_status_label.setMaximumWidth(280)
+        self.status.addPermanentWidget(self.git_status_label)
+        self.git_status_label.hide()
         self._update_status()
+
+    def _update_git_repository_indicator(self, snapshot) -> None:
+        if snapshot is None:
+            self.git_status_label.clear()
+            self.git_status_label.setToolTip("")
+            self.git_status_label.hide()
+            return
+        text = f"Git: {snapshot.branch or 'detached HEAD'}"
+        self.git_status_label.setText(
+            self.git_status_label.fontMetrics().elidedText(text, Qt.ElideMiddle, 260)
+        )
+        self.git_status_label.setToolTip(f"{text}\n{snapshot.root}")
+        self.git_status_label.show()
 
     def _setup_shortcuts(self) -> None:
         QShortcut(QKeySequence(Qt.Key_F2), self, activated=self.rename_selected)
@@ -1058,6 +1085,7 @@ class ExplorerWindow(QMainWindow):
             self.navigation_history.record(self._THIS_PC_HISTORY_ENTRY)
         self._update_nav_actions()
         self._update_status()
+        self.git_overlays.refresh()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._pack_worker is not None:
@@ -1424,6 +1452,12 @@ class ExplorerWindow(QMainWindow):
     def _add_git_menu(self, menu: QMenu) -> None:
         git_menu = QMenu("Git", menu)
         menu.addMenu(git_menu)
+        if self.git_overlays.snapshot is not None:
+            git_menu.setIcon(git_repository_icon())
+            git_menu.menuAction().setIconVisibleInMenu(True)
+            font = git_menu.menuAction().font()
+            font.setBold(True)
+            git_menu.menuAction().setFont(font)
         git_menu.setEnabled(not self._showing_this_pc and self._git_worker is None and self._svn_worker is None)
         directory = self.current_path()
         for label, action in (
@@ -1490,6 +1524,7 @@ class ExplorerWindow(QMainWindow):
         directory = self._git_worker.directory if self._git_worker is not None else None
         paths = self._git_worker.paths if self._git_worker is not None else []
         self._git_worker = None
+        self.git_overlays.refresh()
         self._update_status()
         if not succeeded:
             QMessageBox.warning(self, "Git Operation Failed", str(output))
@@ -2359,6 +2394,7 @@ class ExplorerWindow(QMainWindow):
             self.navigation_history.record(normalized)
         self._update_nav_actions()
         self._update_status()
+        self.git_overlays.refresh()
 
     def _watch_directory(self, path: str) -> None:
         if self._dir_watcher is None:
@@ -3317,6 +3353,7 @@ class ExplorerWindow(QMainWindow):
         if self._view_mode == "thumbnail":
             self._populate_thumbnail_view(current)
         self._update_status()
+        self.git_overlays.refresh()
 
     def _update_status(self) -> None:
         if self._showing_this_pc:

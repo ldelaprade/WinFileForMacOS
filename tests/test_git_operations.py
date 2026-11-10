@@ -34,6 +34,92 @@ class GitOperationsTests(unittest.TestCase):
         nested.mkdir()
         self.assertIn("No commits yet", GitOperations(str(nested)).run("status"))
 
+    def test_icon_status_and_folder_aggregation(self):
+        clean = self.write_file("clean/file.txt")
+        modified = self.write_file("changed/file.txt")
+        deleted = self.write_file("removed/file.txt")
+        ignored_rules = self.write_file(".gitignore", "cache/\n*.tmp\n")
+        self.operations.run("stage", [clean, modified, deleted, ignored_rules])
+        self.operations.run("commit", message="Initial icons")
+        Path(modified).write_text("changed\n")
+        Path(deleted).unlink()
+        added = self.write_file("added/file.txt")
+        self.operations.run("stage", [added])
+        untracked = self.write_file("new/file\nname.txt")
+        ignored = self.write_file("cache/deep/file.txt")
+        ignored_file = self.write_file("scratch.tmp")
+
+        snapshot = GitOperations(str(self.root / "clean")).icon_status()
+
+        for path, expected in (
+            (clean, "clean"), (modified, "modified"), (deleted, "deleted"),
+            (added, "added"), (untracked, "untracked"), (ignored, "ignored"),
+            (ignored_file, "ignored"), (self.root / "clean", "clean"),
+            (self.root / "changed", "modified"), (self.root / "removed", "deleted"),
+            (self.root / "added", "added"), (self.root / "new", "untracked"),
+            (self.root, "deleted"), (self.root / ".git/config", None),
+            (self.root.parent / "outside", None),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(snapshot.status_for(str(path)), expected)
+
+    def test_icon_status_ignored_files_do_not_dirty_parent_folders(self):
+        tracked = self.write_file("folder/file.txt")
+        rules = self.write_file(".gitignore", "cache/\n*.tmp\n")
+        self.operations.run("stage", [tracked, rules])
+        self.operations.run("commit", message="Clean with ignored files")
+        ignored = self.write_file("cache/file.txt")
+        self.write_file("folder/scratch.tmp")
+        snapshot = self.operations.icon_status()
+        self.assertEqual(snapshot.status_for(ignored), "ignored")
+        self.assertEqual(snapshot.status_for(str(self.root / "folder")), "clean")
+        self.assertEqual(snapshot.status_for(str(self.root)), "clean")
+        self.assertIsNone(snapshot.status_for(str(self.root / "absent")))
+
+    def test_icon_status_empty_repository_root_is_clean(self):
+        snapshot = self.operations.icon_status()
+        self.assertEqual(snapshot.status_for(str(self.root)), "clean")
+        self.assertEqual(snapshot.branch, self.repository.active_branch.name)
+
+    def test_icon_status_tracks_branch_switch_and_detached_head(self):
+        path = self.write_file("tracked.txt")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Initial branch indicator")
+        self.operations.run("create_branch", ["indicator-branch"])
+        self.assertEqual(self.operations.icon_status().branch, "indicator-branch")
+        self.repository.git.checkout("--detach", "HEAD")
+        self.assertIsNone(self.operations.icon_status().branch)
+
+    def test_icon_status_rename_updates_both_parent_folders(self):
+        original = self.write_file("old/file.txt")
+        self.operations.run("stage", [original])
+        self.operations.run("commit", message="Initial rename")
+        destination = self.root / "new/file.txt"
+        destination.parent.mkdir()
+        Path(original).rename(destination)
+        self.operations.run("stage", [str(self.root)])
+        snapshot = self.operations.icon_status()
+        for path in (destination, destination.parent, Path(original).parent):
+            self.assertEqual(snapshot.status_for(str(path)), "modified")
+
+    def test_icon_status_conflicts_override_other_folder_states(self):
+        path = self.write_file("folder/file.txt", "base\n")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Base")
+        original_branch = self.repository.active_branch.name
+        self.operations.run("create_branch", ["conflict"])
+        Path(path).write_text("branch\n")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Branch")
+        self.operations.run("switch", [original_branch])
+        Path(path).write_text("main\n")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Main")
+        self.repository.git.merge("conflict", with_exceptions=False)
+        snapshot = self.operations.icon_status()
+        for entry in (path, str(self.root / "folder"), str(self.root)):
+            self.assertEqual(snapshot.status_for(entry), "conflicted")
+
     def test_clone_local_repository_into_explicit_destination(self):
         source_file = self.write_file("source file.txt", "clone content\n")
         self.operations.run("stage", [source_file])
@@ -346,6 +432,38 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.window = ExplorerWindow(initial_path=self.temporary.name)
         self.addCleanup(self.window.close)
+
+    def test_repository_cues_follow_snapshot_and_clear_on_exit(self):
+        from PySide6.QtWidgets import QMenu
+        from src.git_operations import GitIconStatus
+
+        self.window.git_overlays._timer.stop()
+        snapshot = GitIconStatus(self.temporary.name, {".": "clean"}, "feature/indicator")
+        for state in (snapshot, None):
+            self.window.git_overlays._completed(self.window.current_path(), state)
+            menu = QMenu(self.window)
+            self.window._add_git_menu(menu)
+            action = menu.actions()[0]
+            self.assertEqual(action.icon().isNull(), state is None)
+            self.assertEqual(action.font().bold(), state is not None)
+            self.assertEqual(self.window.git_status_label.isHidden(), state is None)
+            if state is not None:
+                self.assertEqual(self.window.git_status_label.text(), "Git: feature/indicator")
+                self.assertIn(self.temporary.name, self.window.git_status_label.toolTip())
+            else:
+                self.assertEqual(self.window.git_status_label.text(), "")
+
+    def test_repository_indicator_detached_head_and_long_branch(self):
+        from PySide6.QtCore import Qt
+        from src.git_operations import GitIconStatus
+
+        self.window._update_git_repository_indicator(GitIconStatus(self.temporary.name, {}))
+        self.assertEqual(self.window.git_status_label.text(), "Git: detached HEAD")
+        branch = "feature/" + "long-branch-name-" * 30
+        self.window._update_git_repository_indicator(GitIconStatus(self.temporary.name, {}, branch))
+        self.assertLess(len(self.window.git_status_label.text()), len(branch))
+        self.assertIn(branch, self.window.git_status_label.toolTip())
+        self.assertEqual(self.window.git_status_label.textFormat(), Qt.PlainText)
 
     def test_menu_enables_staging_without_selection(self):
         from PySide6.QtWidgets import QMenu

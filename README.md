@@ -121,9 +121,34 @@ in a background worker. Missing Git, repository errors, hook failures, and missi
 commit identity are reported in a dialog. Configure identity with `git config
 --global user.name "Your Name"` and `git config --global user.email "you@example.com"`.
 
-This initial increment uses GitPython and standard Git, without hosting-service
-APIs. Status overlays are not yet implemented. No discard, hard-reset, or
-force-push actions are exposed.
+File and folder icons have Tortoise-style status badges for the repository
+containing the current folder, including its entries in Favorites and the machine
+tree. Badges also appear over thumbnail previews without replacing them:
+
+- Green check: clean tracked item.
+- Red exclamation mark: modified (staged or unstaged), including renames.
+- Blue plus: newly added to the index.
+- Gray minus: deleted item (visible on its parent folder).
+- Orange cross: merge conflict.
+- Blue-gray question mark: untracked.
+- Light-gray slash: ignored.
+
+Folder badges summarize their descendants, with conflicts taking priority over
+deletions, modifications, additions, and untracked items. Ignored files do not
+make their parent folders dirty. Hover over an item to see its Git status.
+Status is read in the background when navigating, refreshing, or completing a Git
+operation, and every three seconds to pick up external changes. Network paths
+are excluded from automatic scans. Outside repositories, or if Git is unavailable,
+normal icons are shown.
+
+Inside a detected repository, the **Git** context submenu is bold and has a green
+branch icon. A permanent status-bar indicator shows **Git: branch-name** (or
+**Git: detached HEAD**); its tooltip includes the full branch name and repository
+path. Both cues clear when leaving the repository. **Clone** and **Initialize**
+remain available outside repositories.
+
+Integration uses GitPython and standard Git, without hosting-service APIs.
+No discard, hard-reset, or force-push actions are exposed.
 
 ## SVN Integration
 
