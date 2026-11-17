@@ -4118,6 +4118,11 @@ def run() -> None:
                 window._ftp_shares.clear()
 
     window_manager = _WindowManager()
-    window_manager.create_window()
+    first_window = window_manager.create_window()
+    if getattr(sys, "frozen", False):
+        from .release_updates import ReleaseNotifier
+
+        release_notifier = ReleaseNotifier(first_window)
+        QTimer.singleShot(2000, release_notifier.start)
     app.aboutToQuit.connect(window_manager.stop_all_ftp_shares)
     app.exec()

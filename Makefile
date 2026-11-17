@@ -4,9 +4,10 @@ run:
 # ── Configuration ────────────────────────────────────────────────────────────
 APP_NAME      := RetroFile
 APP_BUNDLE    := dist/$(APP_NAME).app
-DEB_VERSION   ?= 3.0.0
+APP_VERSION   = $(shell $(PYTHON) -c "from src.version import APP_VERSION; print(APP_VERSION)")
+DEB_VERSION   ?= $(APP_VERSION)
 WIN_VERSION   ?= $(DEB_VERSION)
-ISCC          ?= ISCC.exe
+VPK           ?= vpk
 ifeq ($(OS),Windows_NT)
 DEB_ARCH      ?= amd64
 else
@@ -37,7 +38,7 @@ DEV_ID        ?= Developer ID Application: Your Name (TEAMID)
 PROFILE       ?= notarytool-profile
 BUNDLE_ID     ?= com.yourname.explorer
 
-.PHONY: all build unsigned-dmg build-debug trace-debug release dmg notarize staple build-linux build-deb build-windows build-windows-installer clean clean-all
+.PHONY: all build unsigned-dmg build-debug trace-debug release release-macos-dmg dmg notarize staple build-linux build-deb build-windows build-windows-installer clean clean-all
 
 all: build
 
@@ -82,15 +83,15 @@ trace-debug: build-debug
 build-linux:
 	$(PIP) install -q -r requirements.txt pyinstaller
 	$(PYINSTALLER) --windowed \
-	            --onefile \
+	            --onedir \
 	            --name "$(APP_NAME)" \
 	            --noconfirm \
 	            --add-data "$(CURDIR)/resources/icons/application/png/application-256.png$(PYINSTALLER_DATA_SEP)resources/icons/application/png" \
 	            --specpath build \
 	            $(ENTRY)
 	@echo
-	@echo "Built Linux executable: dist/$(APP_NAME)"
-	@echo "Run: ./dist/$(APP_NAME)"
+	@echo "Built Linux executable: dist/$(APP_NAME)/$(APP_NAME)"
+	@echo "Run: ./dist/$(APP_NAME)/$(APP_NAME)"
 
 # ── Ubuntu/Debian package ────────────────────────────────────────────────────
 build-deb: build-linux
@@ -102,7 +103,7 @@ build-deb: build-linux
 		mkdir -p "$$icon_dir"; \
 		cp "resources/icons/application/png/application-$${size}.png" "$$icon_dir/retrofile.png"; \
 	done
-	@cp "dist/$(APP_NAME)" "$(DEB_STAGE)/opt/$(APP_NAME)/$(APP_NAME)"
+	@cp -R "dist/$(APP_NAME)/." "$(DEB_STAGE)/opt/$(APP_NAME)/"
 	@chmod 755 "$(DEB_STAGE)/opt/$(APP_NAME)/$(APP_NAME)"
 	@printf '%s\n' \
 		'Package: retrofile' \
@@ -134,7 +135,7 @@ build-deb: build-linux
 build-windows:
 	$(PIP) install -q -r requirements.txt pyinstaller
 	$(PYINSTALLER) --clean --windowed \
-	            --onefile \
+	            --onedir \
 	            --name "$(APP_NAME)" \
 	            --noconfirm \
 	            --icon "$(CURDIR)/resources/icons/application/windows/application.ico" \
@@ -142,24 +143,22 @@ build-windows:
 	            --specpath build \
 	            $(ENTRY)
 	@echo
-	@echo "Built Windows executable: dist/$(APP_NAME).exe"
-	@echo "Run: dist/$(APP_NAME).exe"
+	@echo "Built Windows executable: dist/$(APP_NAME)/$(APP_NAME).exe"
+	@echo "Run: dist/$(APP_NAME)/$(APP_NAME).exe"
 
-ifeq ($(HOST_OS),Windows)
 build-windows-installer: build-windows
-	powershell.exe -NoProfile -File tools/build_windows_installer.ps1 -AppName "$(APP_NAME)" -Version "$(WIN_VERSION)" -CompilerPath "$(ISCC)"
+	$(PYTHON) tools/build_release.py --app-name "$(APP_NAME)" --version "$(WIN_VERSION)" --vpk "$(VPK)"
 
-release: build-windows-installer
-else ifeq ($(HOST_OS),Linux)
-release: build-deb
-else
+release: build
+	$(PYTHON) tools/build_release.py --app-name "$(APP_NAME)" --version "$(APP_VERSION)" --vpk "$(VPK)"
+
 # ── Signed release build ─────────────────────────────────────────────────────
 # Prerequisites:
 #   1. Apple Developer ID certificate in Keychain
 #   2. App-specific password stored: xcrun notarytool store-credentials $(PROFILE)
 #   3. brew install create-dmg  (for the dmg target)
 
-release:
+release-macos-dmg:
 	@identities=$$(security find-identity -v -p codesigning) || exit $$?; \
 	if printf '%s\n' "$$identities" | grep -F -- "\"$(DEV_ID)\"" >/dev/null; then \
 		$(MAKE) build && \
@@ -172,7 +171,6 @@ release:
 		echo "Signing identity not found: $(DEV_ID). Building an unsigned DMG."; \
 		$(MAKE) unsigned-dmg; \
 	fi
-endif
 
 sign:
 	codesign --deep --force --options runtime \

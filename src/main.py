@@ -4,7 +4,16 @@ import os
 import sys
 from pathlib import Path
 
+if not getattr(sys, "frozen", False):
+    os.environ.pop("QT_PLUGIN_PATH", None)
+    os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+
 multiprocessing.freeze_support()
+
+if __name__ == "__main__":
+    import velopack
+
+    velopack.App().run()
 
 try:
     from .file_explorer import run

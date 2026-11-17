@@ -4,6 +4,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from tools import build_release
 
 
 @unittest.skipIf(shutil.which("make") is None, "Requires make")
@@ -20,6 +23,55 @@ class WindowsReleaseBuildTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--clean", result.stdout)
+
+    def test_velopack_build_uses_directory_output(self):
+        root = Path(__file__).resolve().parents[1]
+        for host in ("Windows", "Linux"):
+            with self.subTest(host=host):
+                result = subprocess.run(
+                    ["make", "--dry-run", "--no-print-directory", f"HOST_OS={host}",
+                     "OS=Windows_NT", "PYTHON=python", f"build-{host.lower()}"],
+                    cwd=root, capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--onedir", result.stdout)
+                self.assertNotIn("--onefile", result.stdout)
+
+    def test_release_routes_every_host_to_velopack(self):
+        root = Path(__file__).resolve().parents[1]
+        for host in ("Windows", "Linux", "Darwin"):
+            with self.subTest(host=host):
+                result = subprocess.run(
+                    ["make", "--dry-run", "--no-print-directory", f"HOST_OS={host}",
+                     "OS=Windows_NT", "PYTHON=python", "release"],
+                    cwd=root, capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("tools/build_release.py", result.stdout)
+                self.assertNotIn("ISCC", result.stdout)
+
+
+class VelopackResolutionTests(unittest.TestCase):
+    def test_missing_cli_installs_pinned_tool_locally(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dotnet = "/fake/dotnet"
+
+            def install_tool(command, cwd, check):
+                self.assertEqual(
+                    command,
+                    [dotnet, "tool", "install", "--tool-path", str(root / ".velopack"),
+                     "vpk", "--version", "1.2.161"],
+                )
+                (root / ".velopack").mkdir()
+                (root / ".velopack" / "vpk").touch()
+
+            with mock.patch.object(
+                build_release.shutil, "which", side_effect=lambda name: dotnet if name == "dotnet" else None
+            ), mock.patch.object(build_release.subprocess, "run", side_effect=install_tool):
+                resolved = build_release.resolve_vpk("vpk", root)
+
+            self.assertEqual(resolved, str(root / ".velopack" / "vpk"))
 
 
 @unittest.skipIf(os.name == "nt" or shutil.which("make") is None, "Requires POSIX make")
@@ -57,7 +109,7 @@ class MakeReleaseTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def run_target(self, target="release", *options):
+    def run_target(self, target="release-macos-dmg", *options):
         return subprocess.run(
             [
                 "make", "--no-print-directory", "-j4",

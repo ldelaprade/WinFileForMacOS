@@ -261,21 +261,105 @@ make build PYTHON=python3
 
 You can also set `PYTHON` to a supported virtual environment's interpreter path.
 
-### Ubuntu/Debian installer
+### Cross-platform releases (Velopack)
 
-On Ubuntu or another Debian-based Linux distribution, `make release` builds a
+Install the [.NET SDK](https://dotnet.microsoft.com/download) on each build
+machine. If `vpk` is not already on `PATH`, `make release` installs the pinned
+CLI version into the ignored `.velopack/` directory:
+
+```bash
+make release
+```
+
+Build on each target OS and CPU architecture. This is one packaging workflow,
+not one binary that runs on every OS. Python is bundled; users do not need
+Python or .NET installed. Git and SVN remain external tools for those features.
+
+Velopack artifacts are under `dist/releases/<runtime>/`:
+
+- Windows: `win-x64` or `win-arm64`, including `RetroFile-win-x64-Setup.exe`.
+- macOS: `osx-x64` or `osx-arm64`, including a `.pkg` installer.
+- Linux: `linux-x64` or `linux-arm64`, including an `.AppImage`, not a system installer.
+
+The runtime is also the release channel, preventing architectures from sharing
+an update index. Keep the package ID `RetroFile` stable. Set `APP_VERSION` in
+`src/version.py` before building a release; packaging rejects a different
+`WIN_VERSION` to avoid disagreement with the running application's version.
+`VPK` can select an explicit CLI path. `make build-windows-installer` remains a
+Windows alias; Inno Setup is no longer used.
+
+Windows/Linux local builds now use PyInstaller directory output. Run
+`dist/RetroFile/RetroFile.exe` on Windows or `dist/RetroFile/RetroFile` on Linux.
+Distribute the whole directory for an unpackaged build, not just its executable.
+
+Signing is not enabled by default. Windows may show SmartScreen warnings and
+macOS may block unsigned applications. Configure Velopack's signing options
+before public distribution, for example `VPK_SIGN_PARAMS` on Windows, or
+`VPK_SIGN_APP_IDENTITY`, `VPK_SIGN_INSTALL_IDENTITY`,
+`VPK_SIGN_ENTITLEMENTS` and `VPK_NOTARY_PROFILE` on macOS. See the
+[Velopack signing guide](https://docs.velopack.io/packaging/signing).
+The legacy DMG signing variables do not configure Velopack signing.
+
+Existing Inno Setup installations are not automatically migrated or removed.
+Uninstall the old application manually before installing the Velopack build;
+application preferences remain in their existing location. Install and uninstall
+the new package in a disposable account or VM before distributing it.
+
+### Publishing and release alerts
+
+`make release` only builds locally. It never uploads or publishes anything.
+Upload the files from each runtime output directory to the same GitHub release,
+including the installer/AppImage, `.nupkg` files, `releases.<channel>.json` and
+`assets.<channel>.json`. Alternatively, use the CLI on each build host, setting
+`VPK_TOKEN` securely in the environment (never commit a token):
+
+```bash
+vpk upload github --repoUrl https://github.com/ldelaprade/WinFileForMacOS --outputDir dist/releases/win-x64 --channel win-x64 --tag v3.0.0 --merge
+```
+
+Replace `win-x64` with the runtime built on that host. Uploads remain draft
+unless explicitly published. After all intended platform assets are uploaded,
+publish a stable release and edit `updates.json` on the default GitHub branch:
+
+```json
+{
+  "enabled": true,
+  "tag": "v3.1.0"
+}
+```
+
+Use the exact published tag. Set `enabled` to `false` to stop future alerts.
+This file is fetched remotely, so changing it does not require rebuilding clients.
+It ships disabled until you are ready to announce a release.
+
+Packaged applications check once at startup, in the background. A notification
+requires a newer stable version and a native installer/AppImage asset for the
+running OS and architecture. Drafts, prereleases, missing assets, invalid JSON,
+timeouts and offline failures produce no alert. Source runs do not check.
+The user can choose **View Release**, **Later**, or disable startup checks with
+the dialog checkbox. To re-enable, set `updates/check_on_startup` to `true` in
+the existing `WinFileXP/WinFileXP` Qt settings.
+
+This initial feature is an availability alert opening the trusted GitHub release
+page after confirmation. It does not download, install, or restart automatically.
+Velopack update packages and startup hooks are in place for a future in-app
+download/apply workflow.
+
+### Ubuntu/Debian package (optional)
+
+On Ubuntu or another Debian-based Linux distribution, `make build-deb` builds a
 minimal native `.deb` installer. It includes the self-contained application,
 desktop launcher, and application icons:
 
 ```bash
-make release
-sudo apt install ./dist/RetroFile_2.0.1_amd64.deb
+make build-deb
+sudo apt install ./dist/RetroFile_3.0.0_amd64.deb
 ```
 
 The package installs the application under `/opt/RetroFile` and adds **RetroFile** to the desktop application menu. Set a different package version when needed:
 
 ```bash
-make release DEB_VERSION=1.1.0
+make build-deb DEB_VERSION=3.0.1
 ```
 
 `make build-deb` remains available to build the package directly.
@@ -286,38 +370,7 @@ To remove it later:
 sudo apt remove retrofile
 ```
 
-### Windows installer
-
-Install [Inno Setup 6](https://jrsoftware.org/isdl.php) once, or use:
-
-```powershell
-winget install --id JRSoftware.InnoSetup --exact
-```
-
-Then build the executable and a minimal Windows installer:
-
-```powershell
-make release
-```
-
-This creates `dist/RetroFile-2.0.1-Setup.exe`. The installer installs for the
-current user without administrator rights, adds a Start menu shortcut, offers
-an optional desktop shortcut, and registers an uninstaller in Windows Settings.
-Python is bundled; users do not need to install it separately. Git and SVN
-remain optional external tools for their respective features.
-
-To set a release version or an explicit Inno Setup compiler path:
-
-```powershell
-make release WIN_VERSION=2.0.2
-make release ISCC="C:/Program Files (x86)/Inno Setup 6/ISCC.exe"
-```
-
-The compiler is detected on `PATH` or in standard Inno Setup 6 installation
-directories. Use `make build-windows` for just the portable executable.
-The installer is unsigned, so Windows may display a SmartScreen warning.
-
-### macOS signed + notarized release (for sharing)
+### macOS signed + notarized DMG (optional)
 
 For a signed and notarized release:
 1. Apple Developer ID certificate in Keychain
@@ -326,7 +379,7 @@ For a signed and notarized release:
 4. Edit the top of `Makefile` to set `DEV_ID`, `PROFILE`, `BUNDLE_ID`
 
 ```bash
-make release
+make release-macos-dmg
 ```
 
 When the configured `DEV_ID` matches a valid code-signing identity in Keychain,
@@ -334,7 +387,7 @@ this runs: build → sign → dmg → notarize → staple. Outputs
 `dist/RetroFile.dmg` ready to share.
 
 If that signing identity is missing (including when `DEV_ID` still has its
-placeholder value), `make release` automatically runs `make unsigned-dmg`
+placeholder value), `make release-macos-dmg` automatically runs `make unsigned-dmg`
 instead, without prompting. It prints a notice that the DMG is unsigned.
 This does not bypass Gatekeeper: macOS may still block or warn about the
 unsigned application. Keychain access errors and failures during signing or

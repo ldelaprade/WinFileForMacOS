@@ -1,5 +1,6 @@
 .venv/
 .venv-*/
+.velopack/
 .DS_Store
 dist
 build
