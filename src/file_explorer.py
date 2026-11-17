@@ -152,6 +152,7 @@ from .folder_archive import (
 from .thumbnail_previews import ThumbnailPreviewProvider
 from .ui_theme import XPIconProvider, xp_stylesheet
 from .git_overlays import GitOverlayController, git_repository_icon
+from .version import APP_VERSION
 
 if TYPE_CHECKING:
     from .git_operations import GitChanges
@@ -393,7 +394,7 @@ class ExplorerWindow(QMainWindow):
         initial_path: str | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("RetroFile Manager")
+        self.setWindowTitle(f"RetroFile Manager v{APP_VERSION}")
         self.resize(1200, 760)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self._open_new_window_callback = open_new_window_callback
@@ -657,6 +658,7 @@ class ExplorerWindow(QMainWindow):
         self.list_view.setDragDropOverwriteMode(False)
         self.list_view.setDefaultDropAction(Qt.MoveAction)
         self.list_view.set_move_confirm_callback(self._confirm_drag_move)
+        self.list_view.set_file_drop_callback(self._handle_thumbnail_drop)
         self.list_view.setSortingEnabled(True)
         self.list_view.sortByColumn(0, Qt.AscendingOrder)
         self.list_view.doubleClicked.connect(self._on_list_double_clicked)
@@ -1224,8 +1226,11 @@ class ExplorerWindow(QMainWindow):
         failures: list[str] = []
         moved_count = 0
         copied_count = 0
+        skipped_count = 0
         destination = Path(target_dir)
 
+        pending_items: list[tuple[Path, Path]] = []
+        conflicts: list[Path] = []
         for source_path_str in source_paths:
             source_path = Path(source_path_str)
             if not source_path.exists():
@@ -1236,19 +1241,54 @@ class ExplorerWindow(QMainWindow):
                 continue
 
             target_path = destination / source_path.name
-            if target_path.exists():
-                failures.append(f"{target_path}: destination already exists")
+            if target_path.exists() or target_path.is_symlink():
+                if not is_move_drop:
+                    conflicts.append(target_path)
+                else:
+                    failures.append(f"{target_path}: destination already exists")
+                    continue
+            pending_items.append((source_path, target_path))
+
+        replace_existing = False
+        if conflicts:
+            response = QMessageBox.question(
+                self,
+                "File(s) already exist",
+                "File(s) already exist. Replace all existing items?\n\n"
+                "Choose No to skip existing items and copy the others, or Cancel to stop.",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.No,
+            )
+            if response == QMessageBox.StandardButton.Cancel:
+                return False
+            replace_existing = response == QMessageBox.StandardButton.Yes
+
+        for source_path, target_path in pending_items:
+            target_exists = target_path.exists() or target_path.is_symlink()
+            if target_exists and not replace_existing:
+                skipped_count += 1
                 continue
 
             try:
+                if target_exists and (
+                    target_path.is_symlink()
+                    or target_path.is_dir() != source_path.is_dir()
+                ):
+                    if target_path.is_dir() and not target_path.is_symlink():
+                        shutil.rmtree(target_path)
+                    else:
+                        target_path.unlink()
+
                 if is_move_drop:
                     shutil.move(str(source_path), str(target_path))
                     moved_count += 1
+                elif source_path.is_dir():
+                    shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+                    copied_count += 1
                 else:
-                    if source_path.is_dir():
-                        shutil.copytree(source_path, target_path)
-                    else:
-                        shutil.copy2(source_path, target_path)
+                    shutil.copy2(source_path, target_path)
                     copied_count += 1
             except OSError as error:
                 failures.append(f"{source_path} -> {target_path}: {error}")
@@ -1265,7 +1305,12 @@ class ExplorerWindow(QMainWindow):
         if moved_count > 0:
             self.status.showMessage(f"Moved {moved_count} item(s)", 2500)
         elif copied_count > 0:
-            self.status.showMessage(f"Copied {copied_count} item(s)", 2500)
+            message = f"Copied {copied_count} item(s)"
+            if skipped_count:
+                message += f"; skipped {skipped_count} existing item(s)"
+            self.status.showMessage(message, 2500)
+        elif skipped_count > 0:
+            self.status.showMessage(f"Skipped {skipped_count} existing item(s)", 2500)
 
         return moved_count > 0 or copied_count > 0 or not failures
 

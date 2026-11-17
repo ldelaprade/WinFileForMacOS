@@ -13,7 +13,7 @@ DEB_ARCH      ?= amd64
 else
 DEB_ARCH      := $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 endif
-DEB_NAME      := dist/$(APP_NAME)_$(DEB_VERSION)_$(DEB_ARCH).deb
+DEB_NAME      = dist/$(APP_NAME)_$(DEB_VERSION)_$(DEB_ARCH).deb
 DEB_STAGE     := dist/.deb-stage
 DMG_NAME      := dist/$(APP_NAME).dmg
 DMG_STAGE     := dist/.dmg-stage

@@ -4,23 +4,67 @@ import os
 import sys
 from collections.abc import Callable
 
-from PySide6.QtCore import QMimeData, Qt, QUrl
-from PySide6.QtGui import QDrag, QDropEvent
-from PySide6.QtWidgets import QFileSystemModel, QListWidget, QTreeView, QTreeWidget
+from PySide6.QtCore import QEvent, QMimeData, QObject, Qt, QUrl
+from PySide6.QtGui import QContextMenuEvent, QDrag, QDropEvent, QMouseEvent
+from PySide6.QtWidgets import QFileSystemModel, QListWidget, QTreeView, QTreeWidget, QWidget
 
 
-class ConfirmingDropTreeView(QTreeView):
+class _ControlClickContextMenuFilter:
+    def __init__(self, parent: QWidget | None = None) -> None:
+        self._control_left_click = False
+        super().__init__(parent)
+        self.viewport().installEventFilter(self)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        self._control_left_click = (
+            event.button() == Qt.MouseButton.LeftButton
+            and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        )
+        super().mousePressEvent(event)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            watched is self.viewport()
+            and self._is_control_left_context_menu(event)
+        ):
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _is_control_left_context_menu(self, event: QEvent) -> bool:
+        return (
+            self._control_left_click
+            and isinstance(event, QContextMenuEvent)
+            and event.reason() == QContextMenuEvent.Reason.Mouse
+        )
+
+
+class ConfirmingDropTreeView(_ControlClickContextMenuFilter, QTreeView):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._confirm_move_callback = None
+        self._file_drop_callback: Callable[[str, list[str], bool], bool] | None = None
 
     def set_move_confirm_callback(self, callback) -> None:
         self._confirm_move_callback = callback
+
+    def set_file_drop_callback(
+        self,
+        callback: Callable[[str, list[str], bool], bool],
+    ) -> None:
+        self._file_drop_callback = callback
 
     def dropEvent(self, event: QDropEvent) -> None:
         is_move_drop = event.proposedAction() == Qt.MoveAction or event.dropAction() == Qt.MoveAction
         destination_path = self._resolve_drop_destination_path(event)
         source_paths = self._resolve_drag_source_paths(event)
+        if self._file_drop_callback is not None and source_paths:
+            if self._file_drop_callback(destination_path, source_paths, is_move_drop):
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+            return
+
         if (
             is_move_drop
             and event.source() is not None
@@ -154,7 +198,7 @@ class MachineTreeWidget(QTreeWidget):
         return [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
 
 
-class FileDragListWidget(QListWidget):
+class FileDragListWidget(_ControlClickContextMenuFilter, QListWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._drop_target_path_callback: Callable[[], str] | None = None

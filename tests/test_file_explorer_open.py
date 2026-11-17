@@ -6,18 +6,91 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from PySide6.QtCore import QDir, QEventLoop, QPoint, QSettings, Qt, QTimer
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtCore import (
+    QDir, QEvent, QEventLoop, QMimeData, QPoint, QPointF, QSettings, Qt, QTimer, QUrl,
+)
+from PySide6.QtGui import QContextMenuEvent, QMouseEvent, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileSystemModel, QListWidget, QListWidgetItem, QMenu, QMessageBox, QTreeView,
+    QAbstractItemView, QApplication, QDialog, QFileSystemModel, QListWidget, QListWidgetItem,
+    QMenu, QMessageBox, QTreeView,
 )
 
 from src.airs_vfs.drive import DriveError
 from src.dialogs import CustomToolsDialog
+from src.dragdrop_views import ConfirmingDropTreeView, FileDragListWidget
 from src.file_explorer import ExplorerWindow, _DiskUnmountWorker, _VfsUnmountWorker
+from src.version import APP_VERSION
 
 
 class FileExplorerOpenTests(unittest.TestCase):
+    def test_file_list_drop_routes_local_files_to_transfer_handler(self):
+        QApplication.instance() or QApplication([])
+        view = ConfirmingDropTreeView()
+        source_path = "/tmp/source.txt"
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(source_path)])
+        event = MagicMock()
+        event.mimeData.return_value = mime_data
+        event.position.return_value = QPointF(0, 0)
+        event.proposedAction.return_value = Qt.DropAction.CopyAction
+        event.dropAction.return_value = Qt.DropAction.CopyAction
+        transfer = MagicMock(return_value=True)
+        view.set_file_drop_callback(transfer)
+
+        view.dropEvent(event)
+
+        transfer.assert_called_once_with("", [source_path], False)
+        event.acceptProposedAction.assert_called_once()
+        event.ignore.assert_not_called()
+        view.close()
+
+    def test_file_views_suppress_control_left_context_menu_but_keep_right_click(self):
+        app = QApplication.instance() or QApplication([])
+        position = QPoint(5, 5)
+        for view_type in (ConfirmingDropTreeView, FileDragListWidget):
+            with self.subTest(view_type=view_type):
+                view = view_type()
+                view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                requests = []
+                view.customContextMenuRequested.connect(requests.append)
+
+                control_press = QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    QPointF(position),
+                    QPointF(position),
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.ControlModifier,
+                )
+                view.mousePressEvent(control_press)
+                control_context = QContextMenuEvent(
+                    QContextMenuEvent.Reason.Mouse,
+                    position,
+                    position,
+                    Qt.KeyboardModifier.ControlModifier,
+                )
+                app.sendEvent(view.viewport(), control_context)
+                self.assertEqual(requests, [])
+
+                right_press = QMouseEvent(
+                    QEvent.Type.MouseButtonPress,
+                    QPointF(position),
+                    QPointF(position),
+                    Qt.MouseButton.RightButton,
+                    Qt.MouseButton.RightButton,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+                view.mousePressEvent(right_press)
+                right_context = QContextMenuEvent(
+                    QContextMenuEvent.Reason.Mouse,
+                    position,
+                    position,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+                app.sendEvent(view.viewport(), right_context)
+                self.assertEqual(len(requests), 1)
+                view.close()
+
     def test_view_modes_share_one_splitter_pane_and_preserve_divider(self):
         app = QApplication.instance() or QApplication([])
         with patch.object(ExplorerWindow, "_load_favorite_paths", return_value=[]), \
@@ -32,6 +105,15 @@ class FileExplorerOpenTests(unittest.TestCase):
                 patch.object(ExplorerWindow, "_update_status"):
             window = ExplorerWindow()
             try:
+                self.assertEqual(window.windowTitle(), f"RetroFile Manager v{APP_VERSION}")
+                self.assertEqual(
+                    window.list_view.selectionMode(),
+                    QAbstractItemView.SelectionMode.ExtendedSelection,
+                )
+                self.assertEqual(
+                    window.thumbnail_view.selectionMode(),
+                    QAbstractItemView.SelectionMode.ExtendedSelection,
+                )
                 window.show()
                 app.processEvents()
                 self.assertEqual(window.splitter.count(), 2)
@@ -201,6 +283,55 @@ class FileExplorerOpenTests(unittest.TestCase):
         mime_data = clipboard.setMimeData.call_args.args[0]
         self.assertEqual([url.toLocalFile() for url in mime_data.urls()], paths)
         self.assertEqual(mime_data.text(), "\n".join(paths))
+
+    def test_copy_drop_prompts_once_for_all_conflicts(self):
+        responses = (
+            (QMessageBox.StandardButton.Yes, "replacement"),
+            (QMessageBox.StandardButton.No, "original"),
+            (QMessageBox.StandardButton.Cancel, "original"),
+        )
+        for response, expected_conflict_contents in responses:
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source_dir = root / "source"
+                destination_dir = root / "destination"
+                source_dir.mkdir()
+                destination_dir.mkdir()
+                source_paths = []
+                for name in ("first.txt", "second.txt"):
+                    source = source_dir / name
+                    source.write_text("replacement", encoding="utf-8")
+                    source_paths.append(str(source))
+                    (destination_dir / name).write_text("original", encoding="utf-8")
+                fresh_source = source_dir / "fresh.txt"
+                fresh_source.write_text("fresh", encoding="utf-8")
+                source_paths.append(str(fresh_source))
+
+                window = MagicMock()
+                with patch(
+                    "src.file_explorer.QMessageBox.question",
+                    return_value=response,
+                ) as question:
+                    handled = ExplorerWindow._handle_thumbnail_drop(
+                        window, str(destination_dir), source_paths, False
+                    )
+
+                question.assert_called_once()
+                self.assertIn("File(s) already exist. Replace", question.call_args.args[2])
+                for name in ("first.txt", "second.txt"):
+                    self.assertEqual(
+                        (destination_dir / name).read_text(encoding="utf-8"),
+                        expected_conflict_contents,
+                    )
+                self.assertEqual(
+                    (destination_dir / "fresh.txt").exists(),
+                    response != QMessageBox.StandardButton.Cancel,
+                )
+                self.assertEqual(handled, response != QMessageBox.StandardButton.Cancel)
+                self.assertEqual(
+                    window.refresh.called,
+                    response != QMessageBox.StandardButton.Cancel,
+                )
 
     def test_application_trash_action_platform_and_bundle_gating(self):
         with tempfile.TemporaryDirectory() as directory:
