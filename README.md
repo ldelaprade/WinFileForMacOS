@@ -333,9 +333,10 @@ This file is fetched remotely, so changing it does not require rebuilding client
 It ships disabled until you are ready to announce a release.
 
 Packaged applications check once at startup, in the background. A notification
-requires a newer stable version and a native installer/AppImage asset for the
-running OS and architecture. Drafts, prereleases, missing assets, invalid JSON,
-timeouts and offline failures produce no alert. Source runs do not check.
+requires a newer, published stable GitHub release; binary installer assets are
+not required. Users can open the release page and build from its source archive.
+Drafts, prereleases, invalid JSON, timeouts and offline failures produce no
+alert. Source runs do not check.
 The user can choose **View Release**, **Later**, or disable startup checks with
 the dialog checkbox. To re-enable, set `updates/check_on_startup` to `true` in
 the existing `WinFileXP/WinFileXP` Qt settings.

@@ -1,5 +1,4 @@
 import json
-import platform
 from urllib.parse import quote
 
 from packaging.version import InvalidVersion, Version
@@ -24,7 +23,7 @@ def release_tag(policy):
     return tag
 
 
-def available_release(release, tag, current_version, system, machine):
+def available_release(release, tag, current_version):
     if not isinstance(release, dict) or release.get("tag_name") != tag:
         return None
     if release.get("draft") is not False or release.get("prerelease") is not False:
@@ -34,22 +33,6 @@ def available_release(release, tag, current_version, system, machine):
         if version.is_prerelease or version.is_devrelease or version <= Version(current_version):
             return None
     except InvalidVersion:
-        return None
-    target = {"Windows": "win", "Darwin": "osx", "Linux": "linux"}.get(system)
-    architecture = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(machine.lower())
-    if not target or not architecture:
-        return None
-    suffix = {"Windows": "Setup.exe", "Darwin": ".pkg", "Linux": ".AppImage"}[system]
-    assets = release.get("assets")
-    if not isinstance(assets, list):
-        return None
-    runtime = f"-{target}-{architecture}"
-    if not any(
-        isinstance(asset, dict) and isinstance(asset.get("name"), str)
-        and any(marker in asset["name"] for marker in (runtime + "-", runtime + "."))
-        and asset["name"].endswith(suffix)
-        for asset in assets
-    ):
         return None
     return str(version), f"https://github.com/{REPOSITORY}/releases/tag/{quote(tag, safe='')}"
 
@@ -96,7 +79,7 @@ class ReleaseNotifier(QObject):
             )
 
     def _release_received(self, release):
-        available = available_release(release, self.tag, APP_VERSION, platform.system(), platform.machine())
+        available = available_release(release, self.tag, APP_VERSION)
         if not available:
             return
         version, url = available

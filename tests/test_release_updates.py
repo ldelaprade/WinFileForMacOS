@@ -23,27 +23,24 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(release_tag({"enabled": True, "tag": "v3.1.0"}), "v3.1.0")
 
     def test_new_stable_release_has_fixed_repository_link(self):
-        result = available_release(self.release(), "v3.1.0", "3.0.0", "Windows", "AMD64")
+        result = available_release(self.release(), "v3.1.0", "3.0.0")
         self.assertEqual(result, ("3.1.0", "https://github.com/ldelaprade/WinFileForMacOS/releases/tag/v3.1.0"))
 
     def test_no_alert_for_old_equal_invalid_or_preview_versions(self):
         for tag in ("v2.9.9", "v3.0.0", "invalid", "v3.1.0rc1", "v3.1.0.dev1"):
-            self.assertIsNone(available_release(self.release(tag=tag), tag, "3.0.0", "Windows", "AMD64"))
+            self.assertIsNone(available_release(self.release(tag=tag), tag, "3.0.0"))
 
-    def test_draft_prerelease_tag_mismatch_and_missing_assets_are_ignored(self):
-        for changes in ({"draft": True}, {"prerelease": True}, {"tag_name": "v9.0.0"}, {"assets": None}):
-            self.assertIsNone(available_release(self.release() | changes, "v3.1.0", "3.0.0", "Windows", "AMD64"))
+    def test_draft_prerelease_and_tag_mismatch_are_ignored(self):
+        for changes in ({"draft": True}, {"prerelease": True}, {"tag_name": "v9.0.0"}):
+            self.assertIsNone(available_release(self.release() | changes, "v3.1.0", "3.0.0"))
 
-    def test_only_matching_native_installers_trigger_alert(self):
-        for system, machine, asset in (
-            ("Windows", "AMD64", "RetroFile-win-x64-Setup.exe"),
-            ("Darwin", "arm64", "RetroFile-osx-arm64-Setup.pkg"),
-            ("Linux", "x86_64", "RetroFile-linux-x64.AppImage"),
-        ):
-            with self.subTest(system=system):
-                self.assertIsNotNone(available_release(self.release(asset), "v3.1.0", "3.0.0", system, machine))
-        for asset in ("RetroFile-win-arm64-Setup.exe", "RetroFile-win-x64-Portable.zip", "RetroFile-Setup.exe"):
-            self.assertIsNone(available_release(self.release(asset), "v3.1.0", "3.0.0", "Windows", "AMD64"))
+    def test_published_release_needs_no_binary_assets(self):
+        release = self.release() | {"assets": []}
+        self.assertIsNotNone(available_release(release, "v3.1.0", "3.0.0"))
+        release.pop("assets")
+        self.assertIsNotNone(available_release(release, "v3.1.0", "3.0.0"))
+        release["assets"] = None
+        self.assertIsNotNone(available_release(release, "v3.1.0", "3.0.0"))
 
     def test_pack_command_uses_native_layout_and_isolated_channels(self):
         for system, machine, runtime, directory in (
@@ -92,9 +89,7 @@ class ReleaseNotifierTests(unittest.TestCase):
     def test_dialog_requires_confirmation_and_preserves_opt_out(self):
         self.notifier.tag = "v999.0.0"
         release = ReleaseTests().release(tag="v999.0.0")
-        with patch("src.release_updates.platform.system", return_value="Windows"), patch(
-            "src.release_updates.platform.machine", return_value="AMD64"
-        ), patch("src.release_updates.QDesktopServices.openUrl") as open_url:
+        with patch("src.release_updates.QDesktopServices.openUrl") as open_url:
             self.notifier._release_received(release)
             self.assertIsNotNone(self.notifier.dialog)
             open_url.assert_not_called()
@@ -105,9 +100,7 @@ class ReleaseNotifierTests(unittest.TestCase):
 
     def test_view_release_opens_fixed_github_url(self):
         self.notifier.tag = "v999.0.0"
-        with patch("src.release_updates.platform.system", return_value="Windows"), patch(
-            "src.release_updates.platform.machine", return_value="AMD64"
-        ), patch("src.release_updates.QDesktopServices.openUrl") as open_url:
+        with patch("src.release_updates.QDesktopServices.openUrl") as open_url:
             self.notifier._release_received(ReleaseTests().release(tag="v999.0.0"))
             self.notifier.dialog.done(QMessageBox.StandardButton.Yes)
             self.assertEqual(open_url.call_args.args[0].toString(), "https://github.com/ldelaprade/WinFileForMacOS/releases/tag/v999.0.0")
