@@ -91,7 +91,7 @@ class GitOperations:
                 if repository.bare or repository.working_tree_dir is None:
                     raise GitOperationError("A working-tree repository is required.")
                 selected = self._relative_paths(repository.working_tree_dir, paths or []) if action in {
-                    "stage", "unstage", "diff"
+                    "stage", "unstage", "diff", "file_diff"
                 } else []
                 with repository.git.custom_environment(
                     GIT_LITERAL_PATHSPECS="1", GIT_TERMINAL_PROMPT="0"
@@ -158,6 +158,13 @@ class GitOperations:
                         return repository.git.diff(
                             "--cached", "--no-ext-diff", "--no-textconv", **self._timeout_options(30)
                         ) or "No staged changes."
+                    if action == "file_diff":
+                        if len(selected) != 1:
+                            raise GitOperationError("Select one modified file to view its diff.")
+                        return repository.git.diff(
+                            "--no-ext-diff", "--no-textconv", "--", *selected,
+                            **self._timeout_options(30),
+                        ) or "No unstaged changes."
                     if action in {"stage", "unstage"}:
                         if not selected:
                             raise GitOperationError("Select files or folders first.")

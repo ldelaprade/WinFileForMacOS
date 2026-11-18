@@ -264,6 +264,20 @@ class GitOperationsTests(unittest.TestCase):
         self.assertEqual([change.path for change in changes.staged], ["modified.txt"])
         self.assertEqual(changes.branch, self.repository.active_branch.name)
 
+    def test_file_diff_shows_unstaged_changes_for_the_selected_file(self):
+        path = self.write_file("folder/file with spaces.txt", "original\n")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Initial file")
+        Path(path).write_text("staged change\n")
+        self.operations.run("stage", [path])
+        Path(path).write_text("staged change\nunstaged change\n")
+
+        diff = self.operations.run("file_diff", [path])
+
+        self.assertIn("+unstaged change", diff)
+        self.assertNotIn("+staged change", diff)
+        self.assertIn("No unstaged changes.", self.operations.run("file_diff", [self.write_file("clean.txt")]))
+
     def test_changes_before_first_commit_and_empty_repository(self):
         self.assertEqual(self.operations.run("staging").staged, [])
         path = self.write_file("new file.txt")
@@ -484,6 +498,30 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         self.assertTrue(actions[1].isEnabled())
         self.assertTrue(actions[2].isEnabled())
         self.assertTrue(actions[5].isEnabled())
+
+    def test_modified_file_contextual_git_menu_offers_file_diff(self):
+        from PySide6.QtWidgets import QMenu
+        from src.git_operations import GitIconStatus
+
+        path = Path(self.temporary.name) / "modified.txt"
+        path.write_text("changed\n")
+        self.window.git_overlays.snapshot = GitIconStatus(
+            self.temporary.name, {"modified.txt": "modified"}
+        )
+        menu = QMenu(self.window)
+        with patch.object(self.window, "_start_git_operation") as start:
+            self.window._add_git_menu(menu, str(path))
+            git_actions = menu.actions()[0].menu().actions()
+            diff_action = next(action for action in git_actions if action.text() == "Diff...")
+            diff_action.trigger()
+        start.assert_called_once_with("file_diff", self.temporary.name, [str(path)])
+
+        self.window.git_overlays.snapshot = GitIconStatus(
+            self.temporary.name, {"modified.txt": "clean"}
+        )
+        menu = QMenu(self.window)
+        self.window._add_git_menu(menu, str(path))
+        self.assertNotIn("Diff...", [action.text() for action in menu.actions()[0].menu().actions()])
 
     def test_menu_uses_current_folder_not_selection(self):
         from PySide6.QtWidgets import QMenu

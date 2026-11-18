@@ -1328,9 +1328,6 @@ class ExplorerWindow(QMainWindow):
         menu.addAction("New File...", self.new_file)
         menu.addAction("Open Terminal", self.open_terminal)
         menu.addAction("Refresh", self.refresh)
-        menu.addSeparator()
-        self._add_git_menu(menu)
-        self._add_svn_menu(menu)
         source = self.sender()
         target = self.current_path()
         clicked_target = None
@@ -1344,6 +1341,9 @@ class ExplorerWindow(QMainWindow):
             if item is not None:
                 target = item.data(Qt.ItemDataRole.UserRole) or target
                 clicked_target = target
+        menu.addSeparator()
+        self._add_git_menu(menu, clicked_target)
+        self._add_svn_menu(menu)
         if clicked_target is not None:
             menu.addSeparator()
             menu.addAction("Copy", lambda path=clicked_target: self._copy_paths([path]))
@@ -1494,7 +1494,7 @@ class ExplorerWindow(QMainWindow):
     def _unmount_vfs_drive(self, letter: str) -> None:
         self._start_unsubst(letter, self._vfs_drives.get(letter), False)
 
-    def _add_git_menu(self, menu: QMenu) -> None:
+    def _add_git_menu(self, menu: QMenu, item_path: str | None = None) -> None:
         git_menu = QMenu("Git", menu)
         menu.addMenu(git_menu)
         if self.git_overlays.snapshot is not None:
@@ -1516,6 +1516,19 @@ class ExplorerWindow(QMainWindow):
                 label,
                 lambda checked=False, operation=action: self._start_git_operation(
                     operation, directory, []
+                ),
+            )
+        snapshot = self.git_overlays.snapshot
+        if (
+            item_path is not None
+            and os.path.isfile(item_path)
+            and snapshot is not None
+            and snapshot.status_for(item_path) == "modified"
+        ):
+            git_menu.addAction(
+                "Diff...",
+                lambda path=item_path: self._start_git_operation(
+                    "file_diff", os.path.dirname(path), [path]
                 ),
             )
         more_menu = QMenu("More", git_menu)
@@ -1594,6 +1607,8 @@ class ExplorerWindow(QMainWindow):
                 self._show_git_output(output.text, directory, output.branches)
             else:
                 self._show_git_output(str(output), directory)
+        elif action == "file_diff":
+            self._show_command_output(str(output), "Git Diff", {})
         elif action in {"switch", "track", "create_branch", "fetch", "publish"}:
             self.status.showMessage(str(output), 4000)
             if directory is not None:
