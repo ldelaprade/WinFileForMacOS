@@ -523,6 +523,42 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         self.window._add_git_menu(menu, str(path))
         self.assertNotIn("Diff...", [action.text() for action in menu.actions()[0].menu().actions()])
 
+    def test_git_diff_dialog_formats_hunk_line_numbers(self):
+        from src.dialogs import GitDiffDialog
+
+        diff = (
+            "diff --git a/file.txt b/file.txt\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/file.txt\n"
+            "+++ b/file.txt\n"
+            "@@ -4,2 +4,3 @@\n"
+            " context\n"
+            "-removed\n"
+            "+added\n"
+            "+new\n"
+        )
+        dialog = GitDiffDialog(diff, self.window)
+        self.addCleanup(dialog.close)
+
+        rendered = dialog.diff_view.toPlainText().splitlines()
+
+        self.assertIn("    4     4   context", rendered)
+        self.assertIn("    5        -removed", rendered)
+        self.assertIn("          5  +added", rendered)
+        self.assertIn("          6  +new", rendered)
+        addition = dialog.diff_view.document().findBlockByNumber(rendered.index("          5  +added"))
+        addition_formats = addition.layout().formats()
+        self.assertTrue(any(
+            item.format.background().color().name() == "#e6ffec"
+            for item in addition_formats
+        ))
+        removal = dialog.diff_view.document().findBlockByNumber(rendered.index("    5        -removed"))
+        removal_formats = removal.layout().formats()
+        self.assertTrue(any(
+            item.format.background().color().name() == "#ffebe9"
+            for item in removal_formats
+        ))
+
     def test_menu_uses_current_folder_not_selection(self):
         from PySide6.QtWidgets import QMenu
 
