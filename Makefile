@@ -29,7 +29,7 @@ PYTHON_NULL   := /dev/null
 PYINSTALLER_DATA_SEP := :
 HOST_OS       := $(shell uname -s)
 endif
-PYTHON        ?= $(or $(firstword $(foreach candidate,$(PYTHON_CANDIDATES),$(shell $(candidate) -c "import sys; assert sys.version_info >= (3, 10); from pip._internal.cli.main import main; print('$(candidate)')" 2>$(PYTHON_NULL)))),python)
+PYTHON        ?= $(or $(firstword $(foreach candidate,$(PYTHON_CANDIDATES),$(shell "$(candidate)" -c "import sys; assert sys.version_info >= (3, 10); from pip._internal.cli.main import main; print('$(candidate)')" 2>$(PYTHON_NULL)))),python)
 PIP           := $(PYTHON) -m pip
 PYINSTALLER   := $(PYTHON) -m PyInstaller
 

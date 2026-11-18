@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import venv
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +12,21 @@ from tools import build_release
 
 @unittest.skipIf(shutil.which("make") is None, "Requires make")
 class WindowsReleaseBuildTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Requires Windows")
+    def test_windows_prefers_virtual_environment_python(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            venv.EnvBuilder(with_pip=True).create(Path(temporary) / ".venv")
+            environment = os.environ.copy()
+            environment.pop("PYTHON", None)
+            result = subprocess.run(
+                ["make", "--dry-run", "--no-print-directory", "-f", str(root / "Makefile"),
+                 "HOST_OS=Windows", "OS=Windows_NT", "build-windows"],
+                cwd=temporary, env=environment, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(".venv/Scripts/python.exe -m pip", result.stdout)
+
     def test_windows_build_cleans_pyinstaller_cache(self):
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(
