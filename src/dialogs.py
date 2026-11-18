@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import SplitResult, unquote, urlsplit
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QKeyEvent, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -36,6 +37,91 @@ from .folder_archive import PACK_FORMATS, PackError, validate_destination
 if TYPE_CHECKING:
     from .git_operations import GitBranchInfo, GitChanges
     from .svn_operations import SvnChanges
+
+
+_GIT_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_DIFF_LINE_NUMBER_WIDTH = 13
+
+
+def _number_git_diff_lines(diff: str) -> str:
+    numbered_lines = []
+    old_line = new_line = None
+    for line in diff.splitlines():
+        match = _GIT_HUNK_HEADER.match(line)
+        if line.startswith("diff --git "):
+            old_line = new_line = None
+        if match:
+            old_line = int(match.group(1))
+            new_line = int(match.group(3))
+            numbered_lines.append(line)
+        elif old_line is not None and new_line is not None and line:
+            marker = line[0]
+            if marker == " ":
+                numbered_lines.append(f"{old_line:>5} {new_line:>5}  {line}")
+                old_line += 1
+                new_line += 1
+            elif marker == "-":
+                numbered_lines.append(f"{old_line:>5} {'':>5}  {line}")
+                old_line += 1
+            elif marker == "+":
+                numbered_lines.append(f"{'':>5} {new_line:>5}  {line}")
+                new_line += 1
+            else:
+                numbered_lines.append(line)
+        else:
+            numbered_lines.append(line)
+    return "\n".join(numbered_lines)
+
+
+class _GitDiffHighlighter(QSyntaxHighlighter):
+    def __init__(self, document) -> None:
+        super().__init__(document)
+        self.added_format = self._format("#116329", "#e6ffec")
+        self.removed_format = self._format("#82071e", "#ffebe9")
+        self.hunk_format = self._format("#0550ae", "#ddf4ff", bold=True)
+        self.header_format = self._format("#57606a", None, bold=True)
+
+    @staticmethod
+    def _format(foreground: str, background: str | None, bold: bool = False) -> QTextCharFormat:
+        text_format = QTextCharFormat()
+        text_format.setForeground(QColor(foreground))
+        if background is not None:
+            text_format.setBackground(QColor(background))
+        if bold:
+            text_format.setFontWeight(QFont.Weight.Bold)
+        return text_format
+
+    def highlightBlock(self, text: str) -> None:
+        if text.startswith("@@"):
+            self.setFormat(0, len(text), self.hunk_format)
+        elif text.startswith(("diff --git ", "--- ", "+++ ", "index ")):
+            self.setFormat(0, len(text), self.header_format)
+        elif len(text) > _DIFF_LINE_NUMBER_WIDTH:
+            content = text[_DIFF_LINE_NUMBER_WIDTH:]
+            if content.startswith("+"):
+                self.setFormat(0, len(text), self.added_format)
+            elif content.startswith("-"):
+                self.setFormat(0, len(text), self.removed_format)
+
+
+class GitDiffDialog(QDialog):
+    def __init__(self, diff: str, parent: QMainWindow | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Git Diff")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.resize(1000, 650)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Old line   New line   Changes", self))
+        self.diff_view = QPlainTextEdit(self)
+        self.diff_view.setReadOnly(True)
+        self.diff_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.diff_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self.highlighter = _GitDiffHighlighter(self.diff_view.document())
+        self.diff_view.setPlainText(_number_git_diff_lines(diff))
+        layout.addWidget(self.diff_view, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class PackFolderDialog(QDialog):

@@ -97,6 +97,7 @@ from .dialogs import (
     FtpLocationDialog,
     FtpShareDialog,
     GitCloneDialog,
+    GitDiffDialog,
     GitStagingDialog,
     SvnCheckoutDialog,
     SvnSelectionDialog,
@@ -1607,8 +1608,8 @@ class ExplorerWindow(QMainWindow):
                 self._show_git_output(output.text, directory, output.branches)
             else:
                 self._show_git_output(str(output), directory)
-        elif action == "file_diff":
-            self._show_command_output(str(output), "Git Diff", {})
+        elif action in {"diff", "file_diff"}:
+            GitDiffDialog(str(output), self).show()
         elif action in {"switch", "track", "create_branch", "fetch", "publish"}:
             self.status.showMessage(str(output), 4000)
             if directory is not None:
