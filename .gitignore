@@ -7,3 +7,4 @@ build
 RetroFile.spec
 RetroFile-debug.spec
 __pycache__
+GITHUB_TOKEN*

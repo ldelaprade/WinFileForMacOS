@@ -310,16 +310,20 @@ the new package in a disposable account or VM before distributing it.
 `make release` only builds locally. It never uploads or publishes anything.
 Upload the files from each runtime output directory to the same GitHub release,
 including the installer/AppImage, `.nupkg` files, `releases.<channel>.json` and
-`assets.<channel>.json`. Alternatively, use the CLI on each build host, setting
-`VPK_TOKEN` securely in the environment (never commit a token):
+`assets.<channel>.json`.
+
+For a local upload of the current host's runtime, `make velo-upload` builds and
+then uploads to the GitHub release tagged `v<APP_VERSION>`. Velopack reads the
+token from `VPK_TOKEN`, `GITHUB_TOKEN`, or the ignored `GITHUB_TOKEN.txt` file:
 
 ```bash
-vpk upload github --repoUrl https://github.com/ldelaprade/WinFileForMacOS --outputDir dist/releases/win-x64 --channel win-x64 --tag v3.0.0 --merge
+make velo-upload
 ```
 
-Replace `win-x64` with the runtime built on that host. Uploads remain draft
-unless explicitly published. After all intended platform assets are uploaded,
-publish a stable release and edit `updates.json` on the default GitHub branch:
+Do not commit the token. It remains an ignored, machine-local secret. The
+target's upload remains draft unless the GitHub release is explicitly published.
+After all intended platform assets are uploaded, publish the stable release and
+edit `updates.json` on the default GitHub branch:
 
 ```json
 {

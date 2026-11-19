@@ -88,7 +88,7 @@ class ReleaseNotifier(QObject):
         self.dialog.setIcon(QMessageBox.Icon.Information)
         self.dialog.setText(f"RetroFile {version} is available.")
         self.dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        self.dialog.button(QMessageBox.StandardButton.Yes).setText("View Release")
+        self.dialog.button(QMessageBox.StandardButton.Yes).setText("Check...")
         self.dialog.button(QMessageBox.StandardButton.No).setText("Later")
         self.dialog.setDefaultButton(QMessageBox.StandardButton.No)
         checkbox = QCheckBox("Check for updates at startup", self.dialog)

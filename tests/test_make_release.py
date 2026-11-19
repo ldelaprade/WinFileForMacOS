@@ -66,8 +66,52 @@ class WindowsReleaseBuildTests(unittest.TestCase):
                 self.assertIn("tools/build_release.py", result.stdout)
                 self.assertNotIn("ISCC", result.stdout)
 
+    def test_velo_upload_runs_build_then_upload(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["make", "--dry-run", "--no-print-directory", "HOST_OS=Darwin",
+             "OS=Darwin", "PYTHON=python", "velo-upload"],
+            cwd=root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        build_position = result.stdout.find("tools/build_release.py")
+        upload_position = result.stdout.find("tools/build_release.py", build_position + 1)
+        self.assertGreater(upload_position, build_position)
+        self.assertIn("--upload", result.stdout)
+
 
 class VelopackResolutionTests(unittest.TestCase):
+    def test_upload_runtime_matches_packaging_channels(self):
+        self.assertEqual(build_release.release_runtime("Windows", "AMD64"), "win-x64")
+        self.assertEqual(build_release.release_runtime("Darwin", "arm64"), "osx-arm64")
+        self.assertEqual(build_release.release_runtime("Linux", "x86_64"), "linux-x64")
+
+    def test_upload_command_uses_release_tag_and_runtime_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_dir = root / "dist" / "releases" / "osx-arm64"
+            output_dir.mkdir(parents=True)
+            with mock.patch.object(build_release, "ROOT", root), mock.patch.object(
+                build_release, "release_runtime", return_value="osx-arm64"
+            ):
+                command, resolved_output = build_release.upload_command(
+                    "RetroFile", "3.0.2", "Darwin", "arm64", "/fake/vpk"
+                )
+
+        self.assertEqual(resolved_output, output_dir)
+        self.assertIn("--tag", command)
+        self.assertEqual(command[command.index("--tag") + 1], "v3.0.2")
+        self.assertEqual(command[command.index("--channel") + 1], "osx-arm64")
+
+    def test_upload_token_uses_environment_before_ignored_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "GITHUB_TOKEN.txt").write_text("file-token\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"VPK_TOKEN": "env-token"}, clear=True):
+                self.assertEqual(build_release.resolve_upload_token(root), "env-token")
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(build_release.resolve_upload_token(root), "file-token")
+
     def test_missing_cli_installs_pinned_tool_locally(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

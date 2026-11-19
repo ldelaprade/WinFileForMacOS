@@ -1,4 +1,5 @@
 import argparse
+import os
 import platform
 import runpy
 import shutil
@@ -9,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 APP_VERSION = runpy.run_path(str(ROOT / "src" / "version.py"))["APP_VERSION"]
 VPK_VERSION = "1.2.161"
+REPOSITORY_URL = "https://github.com/ldelaprade/WinFileForMacOS"
 
 
 def pack_command(app_name, version, system, machine, vpk="vpk"):
@@ -32,6 +34,40 @@ def pack_command(app_name, version, system, machine, vpk="vpk"):
         "--icon", str(ROOT / "resources" / "icons" / "application" / icon),
         "--outputDir", str(ROOT / "dist" / "releases" / runtime),
     ]
+
+
+def release_runtime(system, machine):
+    architectures = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "aarch64": "arm64"}
+    if machine.lower() not in architectures:
+        raise ValueError("Unsupported release architecture")
+    targets = {"Windows": "win", "Darwin": "osx", "Linux": "linux"}
+    if system not in targets:
+        raise ValueError("Unsupported release operating system")
+    return f"{targets[system]}-{architectures[machine.lower()]}"
+
+
+def resolve_upload_token(root=ROOT):
+    token = os.environ.get("VPK_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token.strip()
+    token_file = root / "GITHUB_TOKEN.txt"
+    if token_file.is_file():
+        token = token_file.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+    raise RuntimeError("Set VPK_TOKEN or GITHUB_TOKEN, or create ignored GITHUB_TOKEN.txt.")
+
+
+def upload_command(app_name, version, system, machine, vpk="vpk"):
+    runtime = release_runtime(system, machine)
+    output_dir = ROOT / "dist" / "releases" / runtime
+    if not output_dir.is_dir():
+        raise FileNotFoundError(f"Missing Velopack release directory: {output_dir}")
+    return [
+        vpk, "upload", "github", "--repoUrl", REPOSITORY_URL,
+        "--outputDir", str(output_dir), "--channel", runtime,
+        "--tag", f"v{version}", "--merge",
+    ], output_dir
 
 
 def resolve_vpk(vpk, root=ROOT):
@@ -62,14 +98,25 @@ def main():
     parser.add_argument("--app-name", default="RetroFile")
     parser.add_argument("--version", default=APP_VERSION)
     parser.add_argument("--vpk", default="vpk")
+    parser.add_argument("--upload", action="store_true", help="Upload the current runtime build to GitHub.")
     args = parser.parse_args()
     try:
         args.vpk = resolve_vpk(args.vpk)
-        command = pack_command(args.app_name, args.version, platform.system(), platform.machine(), args.vpk)
-        if not Path(command[command.index("--packDir") + 1]).is_dir():
-            parser.error("Missing application directory. Run make build first.")
-        subprocess.run(command, cwd=ROOT, check=True)
-    except (ValueError, FileNotFoundError, subprocess.CalledProcessError) as error:
+        if args.upload:
+            token = resolve_upload_token()
+            command, output_dir = upload_command(
+                args.app_name, args.version, platform.system(), platform.machine(), args.vpk
+            )
+            environment = os.environ.copy()
+            environment["VPK_TOKEN"] = token
+            subprocess.run(command, cwd=ROOT, env=environment, check=True)
+            print(f"Uploaded {args.app_name} v{args.version} assets from {output_dir}")
+        else:
+            command = pack_command(args.app_name, args.version, platform.system(), platform.machine(), args.vpk)
+            if not Path(command[command.index("--packDir") + 1]).is_dir():
+                parser.error("Missing application directory. Run make build first.")
+            subprocess.run(command, cwd=ROOT, check=True)
+    except (ValueError, FileNotFoundError, RuntimeError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"{error}\n")
 
 
