@@ -38,7 +38,7 @@ DEV_ID        ?= Developer ID Application: Your Name (TEAMID)
 PROFILE       ?= notarytool-profile
 BUNDLE_ID     ?= com.yourname.explorer
 
-.PHONY: all build unsigned-dmg build-debug trace-debug release velo-upload release-macos-dmg dmg notarize staple build-linux build-deb build-windows build-windows-installer clean clean-all
+.PHONY: all build unsigned-dmg build-debug trace-debug release velo-upload velo-publish release-macos-dmg dmg notarize staple build-linux build-deb build-windows build-windows-installer clean clean-all
 
 all: build
 
@@ -154,6 +154,9 @@ release: build
 
 velo-upload: release
 	$(PYTHON) tools/build_release.py --app-name "$(APP_NAME)" --version "$(APP_VERSION)" --vpk "$(VPK)" --upload
+
+velo-publish:
+	$(PYTHON) tools/publish_release.py --confirm
 
 # ── Signed release build ─────────────────────────────────────────────────────
 # Prerequisites:

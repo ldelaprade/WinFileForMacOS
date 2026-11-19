@@ -336,6 +336,18 @@ Use the exact published tag. Set `enabled` to `false` to stop future alerts.
 This file is fetched remotely, so changing it does not require rebuilding clients.
 It ships disabled until you are ready to announce a release.
 
+After every platform upload is complete, run:
+
+```bash
+make velo-publish
+```
+
+The publish target verifies that `main` uses the SSH origin, the `v<APP_VERSION>`
+tag exists locally and remotely, and the GitHub credential is available. It
+commits and pushes only `updates.json`, then assigns the matching tag and
+publishes the existing draft release. This target deliberately requires
+`--confirm` internally so it cannot run accidentally from a dry run or typo.
+
 Packaged applications check once at startup, in the background. A notification
 requires a newer, published stable GitHub release; binary installer assets are
 not required. Users can open the release page and build from its source archive.

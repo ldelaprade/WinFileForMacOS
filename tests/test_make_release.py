@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import subprocess
 import tempfile
@@ -8,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from tools import build_release
+from tools import publish_release
 
 
 @unittest.skipIf(shutil.which("make") is None, "Requires make")
@@ -79,6 +81,15 @@ class WindowsReleaseBuildTests(unittest.TestCase):
         self.assertGreater(upload_position, build_position)
         self.assertIn("--upload", result.stdout)
 
+    def test_velo_publish_requires_confirmation(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+        ["make", "--dry-run", "--no-print-directory", "velo-publish"],
+        cwd=root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("tools/publish_release.py --confirm", result.stdout)
+
 
 class VelopackResolutionTests(unittest.TestCase):
     def test_upload_runtime_matches_packaging_channels(self):
@@ -132,6 +143,62 @@ class VelopackResolutionTests(unittest.TestCase):
                 resolved = build_release.resolve_vpk("vpk", root)
 
             self.assertEqual(resolved, str(root / ".velopack" / "vpk"))
+
+
+class PublishReleaseTests(unittest.TestCase):
+    def test_version_tag_matches_application_version(self):
+        self.assertEqual(publish_release.version_tag(), "v3.1.0")
+
+    def test_publish_draft_patches_tag_and_publication(self):
+        releases = [
+            {
+                "id": 123,
+                "tag_name": "untagged-6af3dd6c91d1d31d61e4",
+                "draft": True,
+            }
+        ]
+        calls = []
+
+        def request(method, path, token, body=None):
+            calls.append((method, path, token, body))
+            if method == "GET":
+                return releases
+            return {"id": 123, "tag_name": "v3.1.0", "draft": False,
+                    "html_url": "https://example.test/release"}
+
+        with mock.patch.object(publish_release, "api_request", side_effect=request):
+            release = publish_release.publish_github_release("v3.1.0", "token")
+
+        self.assertFalse(release["draft"])
+        self.assertEqual(calls[-1], (
+            "PATCH",
+            "/releases/123",
+            "token",
+            {"tag_name": "v3.1.0", "draft": False, "prerelease": False},
+        ))
+
+    def test_policy_is_enabled_with_exact_version_tag(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            policy_file = root / "updates.json"
+            policy_file.write_text('{"enabled":false,"tag":"v3.0.0"}\n', encoding="utf-8")
+
+            def git_result(*args, **kwargs):
+                if args[:3] == ("diff", "--cached", "--quiet"):
+                    return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with mock.patch.object(publish_release, "UPDATES_FILE", policy_file), mock.patch.object(
+                publish_release, "git",
+                side_effect=git_result,
+            ):
+                changed = publish_release.write_update_policy("v3.1.0")
+
+            self.assertTrue(changed)
+            self.assertEqual(json.loads(policy_file.read_text(encoding="utf-8")), {
+                "enabled": True,
+                "tag": "v3.1.0",
+            })
 
 
 @unittest.skipIf(os.name == "nt" or shutil.which("make") is None, "Requires POSIX make")
