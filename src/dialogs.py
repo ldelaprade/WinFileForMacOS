@@ -510,6 +510,39 @@ class GitRepositoryStatusDialog(QDialog):
         remote_layout.addRow("", self.track_button)
         layout.addWidget(remote_group)
 
+        repository_remote_group = QGroupBox("Repository remotes", self)
+        repository_remote_layout = QHBoxLayout(repository_remote_group)
+        self.remote_name_combo = QComboBox(repository_remote_group)
+        self.remote_name_combo.addItems(branches.remotes)
+        self.remote_url_edit = QLineEdit(repository_remote_group)
+        self.remote_url_edit.setPlaceholderText("https://github.com/owner/repository.git")
+        self.update_remote_url_button = QPushButton("Update URL", repository_remote_group)
+        self.update_remote_url_button.clicked.connect(self._update_remote_url)
+
+        def update_remote_url_field(remote_name: str) -> None:
+            self.remote_url_edit.setText(branches.remote_urls.get(remote_name, ""))
+
+        if branches.remotes:
+            update_remote_url_field(branches.remotes[0])
+        else:
+            self.remote_name_combo.addItem("No remotes configured")
+            self.remote_name_combo.setEnabled(False)
+            self.remote_url_edit.setEnabled(False)
+            self.update_remote_url_button.setEnabled(False)
+        self.remote_name_combo.currentTextChanged.connect(update_remote_url_field)
+        self.remote_url_edit.textChanged.connect(
+            lambda url: self.update_remote_url_button.setEnabled(
+                bool(self.remote_name_combo.currentText().strip())
+                and bool(url.strip())
+                and self.remote_name_combo.isEnabled()
+            )
+        )
+        repository_remote_layout.addWidget(QLabel("Remote:", repository_remote_group))
+        repository_remote_layout.addWidget(self.remote_name_combo)
+        repository_remote_layout.addWidget(self.remote_url_edit, 1)
+        repository_remote_layout.addWidget(self.update_remote_url_button)
+        layout.addWidget(repository_remote_group)
+
         create_group = QGroupBox("Create an unlinked local branch", self)
         create_layout = QHBoxLayout(create_group)
         self.new_branch_name = QLineEdit(create_group)
@@ -570,6 +603,12 @@ class GitRepositoryStatusDialog(QDialog):
         remote = self.publish_remote_combo.currentText()
         if remote and self.current_branch:
             self._run_operation("publish", [remote, self.current_branch])
+
+    def _update_remote_url(self) -> None:
+        remote = self.remote_name_combo.currentText().strip()
+        url = self.remote_url_edit.text().strip()
+        if remote and url:
+            self._run_operation("set_remote_url", [remote, url])
 
     def _run_operation(self, action: str, paths: list[str]) -> None:
         self.accept()

@@ -1635,7 +1635,7 @@ class ExplorerWindow(QMainWindow):
                 self._show_git_output(str(output), directory)
         elif action in {"diff", "file_diff"}:
             GitDiffDialog(str(output), self).show()
-        elif action in {"switch", "track", "create_branch", "fetch", "publish"}:
+        elif action in {"switch", "track", "create_branch", "fetch", "publish", "set_remote_url"}:
             self.status.showMessage(str(output), 4000)
             if directory is not None:
                 self._start_git_operation("status", directory, [])

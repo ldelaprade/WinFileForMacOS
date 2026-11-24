@@ -214,6 +214,28 @@ class GitOperationsTests(unittest.TestCase):
                 self.assertEqual(self.repository.active_branch.tracking_branch().name, "origin/git2")
                 self.assertEqual(remote.commit("git2"), self.repository.head.commit)
 
+    def test_remote_url_is_reported_and_can_be_updated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with Repo.init(Path(directory) / "remote.git", bare=True) as remote:
+                self.repository.create_remote("origin", remote.git_dir)
+                info = self.operations.branch_info()
+                self.assertEqual(info.remote_urls["origin"], remote.git_dir)
+
+                output = self.operations.run(
+                    "set_remote_url",
+                    ["origin", "https://github.com/example/repository.git"],
+                )
+                self.assertIn("Updated remote 'origin' URL", output)
+                self.assertEqual(
+                    self.repository.remotes.origin.url,
+                    "https://github.com/example/repository.git",
+                )
+
+                with self.assertRaisesRegex(GitOperationError, "does not exist"):
+                    self.operations.run("set_remote_url", ["missing", "https://example.invalid/repo.git"])
+                with self.assertRaisesRegex(GitOperationError, "URL is required"):
+                    self.operations.run("set_remote_url", ["origin", ""])
+
     def test_branch_switch_preserves_changes_and_invalid_branch_names_fail(self):
         path = self.write_file("tracked.txt", "initial\n")
         self.operations.run("stage", [path])

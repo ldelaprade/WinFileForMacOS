@@ -45,6 +45,7 @@ class GitBranchInfo:
     remote: list[tuple[str, str]]
     upstream: str | None = None
     remotes: list[str] = field(default_factory=list)
+    remote_urls: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,17 @@ class GitOperations:
                             *options, with_extended_output=True, **self._timeout_options(120)
                         )
                         return "\n".join(part for part in (stdout, stderr) if part) or f"Git {action} completed."
+                    if action == "set_remote_url":
+                        if not paths or len(paths) != 2:
+                            raise GitOperationError("Select a remote and enter its URL.")
+                        remote_name, url = paths
+                        if remote_name not in {item.name for item in repository.remotes}:
+                            raise GitOperationError(f"Git remote '{remote_name}' does not exist.")
+                        url = url.strip()
+                        if not url:
+                            raise GitOperationError("A remote URL is required.")
+                        repository.git.remote("set-url", remote_name, url, **self._timeout_options(30))
+                        return f"Updated remote '{remote_name}' URL."
                     if action == "publish":
                         if not paths or len(paths) != 2:
                             raise GitOperationError("Select a remote to publish the current branch to.")
@@ -322,6 +334,10 @@ class GitOperations:
                     remote,
                     tracking.name if tracking is not None else None,
                     sorted(item.name for item in repository.remotes),
+                    {
+                        item.name: next(iter(item.urls), "")
+                        for item in repository.remotes
+                    },
                 )
         except (InvalidGitRepositoryError, NoSuchPathError) as error:
             raise GitOperationError("This folder is not inside a Git repository.") from error
