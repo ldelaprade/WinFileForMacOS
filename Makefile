@@ -1,5 +1,5 @@
 # Run in package mode
-run:
+run: ## Run RetroFile from source
 	python -m src.main
 # ── Configuration ────────────────────────────────────────────────────────────
 APP_NAME      := RetroFile
@@ -38,17 +38,22 @@ DEV_ID        ?= Developer ID Application: Your Name (TEAMID)
 PROFILE       ?= notarytool-profile
 BUNDLE_ID     ?= com.yourname.explorer
 
-.PHONY: all build unsigned-dmg build-debug trace-debug release velo-upload velo-publish release-macos-dmg dmg notarize staple build-linux build-deb build-windows build-windows-installer clean clean-all
+.PHONY: help all build unsigned-dmg build-debug trace-debug release velo-upload velo-publish release-macos-dmg dmg notarize staple build-linux build-deb build-windows build-windows-installer clean clean-all run
 
-all: build
+help: ## List available targets and their descriptions
+	@awk 'BEGIN { print "Available targets:" } /^[a-zA-Z0-9_.-]+:[^#]*##/ { target=$$1; sub(/:.*/, "", target); if (!seen[target]++) { sub(/^[^#]*##[[:space:]]*/, "", $$0); printf "  %-24s %s\n", target, $$0 } }' $(MAKEFILE_LIST)
+
+all: build ## Build the application for the current platform
 
 # ── Local unsigned build ──────────────────────────────────────────────────────
+build: ## Build the application for the current platform
+
 ifeq ($(HOST_OS),Linux)
 build: build-linux
 else ifeq ($(HOST_OS),Windows)
 build: build-windows
 else
-build:
+build: ## Build the application for macOS
 	$(PIP) install -q -r requirements.txt pyinstaller
 	$(PYINSTALLER) --windowed \
 	            --name "$(APP_NAME)" \
@@ -60,12 +65,12 @@ build:
 	@echo "Drag to /Applications or run: open $(APP_BUNDLE)"
 endif
 
-unsigned-dmg: build
+unsigned-dmg: build ## Build an unsigned macOS DMG
 	$(MAKE) dmg
 	@echo "✓ Unsigned DMG ready: $(DMG_NAME)"
 
 # ── Debug build for crash tracing ───────────────────────────────────────────
-build-debug:
+build-debug: ## Build a macOS debug bundle with trace logging
 	$(PIP) install -q -r requirements.txt pyinstaller
 	$(PYINSTALLER) --console \
 	            --debug all \
@@ -76,11 +81,11 @@ build-debug:
 	@echo
 	@echo "Built debug executable: dist/$(APP_NAME)-debug/$(APP_NAME)-debug"
 
-trace-debug: build-debug
+trace-debug: build-debug ## Run the macOS debug build
 	./dist/$(APP_NAME)-debug/$(APP_NAME)-debug
 
 # ── Linux build ────────────────────────────────────────────────────────────────
-build-linux:
+build-linux: ## Build a Linux onedir application
 	$(PIP) install -q -r requirements.txt pyinstaller
 	$(PYINSTALLER) --windowed \
 	            --onedir \
@@ -94,7 +99,7 @@ build-linux:
 	@echo "Run: ./dist/$(APP_NAME)/$(APP_NAME)"
 
 # ── Ubuntu/Debian package ────────────────────────────────────────────────────
-build-deb: build-linux
+build-deb: build-linux ## Build an Ubuntu/Debian .deb package
 	@command -v dpkg-deb >/dev/null 2>&1 || (echo "dpkg-deb is required to build an Ubuntu package." && exit 1)
 	@rm -rf "$(DEB_STAGE)" "$(DEB_NAME)"
 	@mkdir -p "$(DEB_STAGE)/DEBIAN" "$(DEB_STAGE)/opt/$(APP_NAME)" "$(DEB_STAGE)/usr/share/applications"
@@ -132,7 +137,7 @@ build-deb: build-linux
 	@echo "Install with: sudo apt install ./$(DEB_NAME)"
 
 # ── Windows build ──────────────────────────────────────────────────────────────
-build-windows:
+build-windows: ## Build a Windows onedir application
 	$(PIP) install -q -r requirements.txt pyinstaller
 	$(PYINSTALLER) --clean --windowed \
 	            --onedir \
@@ -146,16 +151,13 @@ build-windows:
 	@echo "Built Windows executable: dist/$(APP_NAME)/$(APP_NAME).exe"
 	@echo "Run: dist/$(APP_NAME)/$(APP_NAME).exe"
 
-build-windows-installer: build-windows
-	$(PYTHON) tools/build_release.py --app-name "$(APP_NAME)" --version "$(WIN_VERSION)" --vpk "$(VPK)"
-
-release: build
+release: build ## Build release artifacts for the current platform
 	$(PYTHON) tools/build_release.py --app-name "$(APP_NAME)" --version "$(APP_VERSION)" --vpk "$(VPK)"
 
-velo-upload: release
+velo-upload: release ## Build and upload a release artifact
 	$(PYTHON) tools/build_release.py --app-name "$(APP_NAME)" --version "$(APP_VERSION)" --vpk "$(VPK)" --upload
 
-velo-publish:
+velo-publish: ## Publish a previously built release
 	$(PYTHON) tools/publish_release.py --confirm
 
 # ── Signed release build ─────────────────────────────────────────────────────
@@ -164,7 +166,7 @@ velo-publish:
 #   2. App-specific password stored: xcrun notarytool store-credentials $(PROFILE)
 #   3. brew install create-dmg  (for the dmg target)
 
-release-macos-dmg:
+release-macos-dmg: ## Build and optionally sign, notarize, and staple a macOS DMG
 	@identities=$$(security find-identity -v -p codesigning) || exit $$?; \
 	if printf '%s\n' "$$identities" | grep -F -- "\"$(DEV_ID)\"" >/dev/null; then \
 		$(MAKE) build && \
@@ -178,13 +180,13 @@ release-macos-dmg:
 		$(MAKE) unsigned-dmg; \
 	fi
 
-sign:
+sign: ## Sign the macOS application bundle
 	codesign --deep --force --options runtime \
 	         --sign "$(DEV_ID)" \
 	         --entitlements entitlements.plist \
 	         "$(APP_BUNDLE)"
 
-dmg:
+dmg: ## Create a macOS DMG from the application bundle
 	@test -d "$(APP_BUNDLE)" || (echo "Missing app bundle: $(APP_BUNDLE). Run 'make build' first." && exit 1)
 	@rm -rf "$(DMG_STAGE)"
 	@mkdir -p "$(DMG_STAGE)"
@@ -206,30 +208,30 @@ dmg:
 	@rm -rf "$(DMG_STAGE)"
 	@echo "Built DMG: $(DMG_NAME)"
 
-notarize:
+notarize: ## Submit and notarize the macOS DMG
 	xcrun notarytool submit "$(DMG_NAME)" \
 	      --keychain-profile "$(PROFILE)" \
 	      --bundle-id "$(BUNDLE_ID)" \
 	      --wait
 
-staple:
+staple: ## Staple the notarization ticket to the macOS DMG
 	xcrun stapler staple "$(DMG_NAME)"
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 ifeq ($(OS),Windows_NT)
-clean:
+clean: ## Remove caches and Python bytecode
 	powershell.exe -NoProfile -Command "$$ErrorActionPreference = 'Stop'; Get-ChildItem -LiteralPath . -Directory -Recurse -Force -Filter '__pycache__' | Remove-Item -Recurse -Force"
 	powershell.exe -NoProfile -Command "$$ErrorActionPreference = 'Stop'; Get-ChildItem -LiteralPath . -File -Recurse -Force | Where-Object { $$_.Extension -in @('.pyc','.pyo') } | Remove-Item -Force"
 	powershell.exe -NoProfile -Command "$$ErrorActionPreference = 'Stop'; foreach ($$path in @('.pytest_cache','.mypy_cache','.ruff_cache')) { if (Test-Path -LiteralPath $$path) { Remove-Item -LiteralPath $$path -Recurse -Force } }"
 
-clean-all: clean
+clean-all: clean ## Remove build outputs in addition to caches
 	powershell.exe -NoProfile -Command "$$ErrorActionPreference = 'Stop'; foreach ($$path in @('build','dist')) { if (Test-Path -LiteralPath $$path) { Remove-Item -LiteralPath $$path -Recurse -Force } }"
 else
-clean:
+clean: ## Remove caches and Python bytecode
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
 	find . -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
 	rm -rf .pytest_cache .mypy_cache .ruff_cache
 
-clean-all: clean
+clean-all: clean ## Remove build outputs in addition to caches
 	rm -rf build dist
 endif
