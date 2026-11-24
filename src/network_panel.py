@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -10,7 +12,7 @@ from urllib.parse import unquote, urlparse
 
 from PySide6.QtCore import QMimeData, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWidgetItem, QWidget, QFileIconProvider
+from PySide6.QtWidgets import QApplication, QMenu, QStyle, QTreeWidget, QTreeWidgetItem, QWidget, QFileIconProvider, QMessageBox
 
 from .ui_theme import XPIconProvider
 from .ssh_mount import unmount_ssh_path
@@ -18,6 +20,13 @@ from .ftp_mount import active_windows_ftp_mounts, is_windows_ftp_mount, unmount_
 
 
 _WINDOWS_KNOWN_SHARES_KEY = "network/known_windows_shares"
+_REMOTE_CONTROL_TARGETS_KEY = "network/remote_control_targets"
+_REMOTE_CONTROL_PROTOCOLS = {
+    "screen_sharing": "Mac Screen Sharing",
+    "vnc": "VNC",
+    "rdp": "Microsoft Remote Desktop",
+    "rustdesk": "RustDesk",
+}
 NETWORK_PROBE_TIMEOUT_MS = 3000
 _UNREACHABLE_SECONDS = 30.0
 _unreachable_until: dict[str, float] = {}
@@ -402,6 +411,8 @@ class NetworkPanel(QTreeWidget):
     _IS_SHARE_ROLE = Qt.UserRole + 1
     _LOADED_ROLE = Qt.UserRole + 2
     _SOURCE_URL_ROLE = Qt.UserRole + 3
+    _REMOTE_CONTROL_ROLE = Qt.UserRole + 4
+    _REMOTE_CONTROL_TARGET_ROLE = Qt.UserRole + 5
 
     def __init__(
         self,
@@ -416,6 +427,7 @@ class NetworkPanel(QTreeWidget):
         self._ftp_callback = ftp_callback
         self._settings = QSettings("WinFileXP", "WinFileXP")
         self._known_windows_shares = self._load_known_windows_shares()
+        self._remote_control_targets = self._load_remote_control_targets()
         style = QApplication.style()
         self._network_root_icon = style.standardIcon(QStyle.SP_DriveNetIcon)
         icon_provider = XPIconProvider()
@@ -460,6 +472,10 @@ class NetworkPanel(QTreeWidget):
         if os.name == "nt":
             shares.extend(self._known_windows_share_entries())
 
+        locations_item = QTreeWidgetItem(self, ["Network Locations"])
+        locations_item.setIcon(0, self._network_root_icon)
+        locations_item.setFlags(Qt.ItemIsEnabled)
+
         seen_paths: set[str] = set()
         for display_name, mount_path, source_url in shares:
             normalized = (
@@ -470,7 +486,7 @@ class NetworkPanel(QTreeWidget):
             if normalized in seen_paths:
                 continue
             seen_paths.add(normalized)
-            item = QTreeWidgetItem(self, [f"{display_name} ({source_url})"])
+            item = QTreeWidgetItem(locations_item, [f"{display_name} ({source_url})"])
             item.setData(0, self._PATH_ROLE, mount_path)
             item.setData(0, self._IS_SHARE_ROLE, True)
             item.setData(0, self._LOADED_ROLE, False)
@@ -479,8 +495,33 @@ class NetworkPanel(QTreeWidget):
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             # Shares are only accessed on demand (expand/click), never while listing.
             self._add_placeholder_child(item)
+        if locations_item.childCount():
+            locations_item.setExpanded(True)
+
+        remote_item = QTreeWidgetItem(self, ["Remote Control Targets"])
+        remote_item.setIcon(
+            0,
+            QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon),
+        )
+        remote_item.setFlags(Qt.ItemIsEnabled)
+        for target in self._remote_control_targets:
+            protocol_label = _REMOTE_CONTROL_PROTOCOLS.get(target["protocol"], target["protocol"])
+            item = QTreeWidgetItem(remote_item, [f"{target['name']} ({protocol_label})"])
+            item.setData(0, self._REMOTE_CONTROL_ROLE, True)
+            item.setData(0, self._REMOTE_CONTROL_TARGET_ROLE, target)
+            item.setData(0, self._IS_SHARE_ROLE, False)
+            item.setIcon(
+                0,
+                QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon),
+            )
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        remote_item.setExpanded(True)
 
     def _on_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        target = item.data(0, self._REMOTE_CONTROL_TARGET_ROLE)
+        if isinstance(target, dict):
+            self._launch_remote_control_target(target)
+            return
         path = item.data(0, self._PATH_ROLE)
         if path:
             self.navigate_requested.emit(path)
@@ -565,8 +606,21 @@ class NetworkPanel(QTreeWidget):
 
         if item is None:
             menu.addMenu(add_location_menu)
+            menu.addAction("Add Remote Control Target...", self._add_remote_control_target)
             menu.addAction("Refresh", self.refresh_shares)
         else:
+            target = item.data(0, self._REMOTE_CONTROL_TARGET_ROLE)
+            if isinstance(target, dict):
+                menu.addAction("Remote Control", lambda t=target: self._launch_remote_control_target(t))
+                menu.addAction("Edit Target...", lambda t=target: self._edit_remote_control_target(t))
+                menu.addAction("Remove Target", lambda t=target: self._remove_remote_control_target(t))
+                menu.addSeparator()
+                menu.addMenu(add_location_menu)
+                menu.addAction("Add Remote Control Target...", self._add_remote_control_target)
+                menu.addAction("Refresh", self.refresh_shares)
+                menu.exec(self.viewport().mapToGlobal(pos))
+                return
+
             path = item.data(0, self._PATH_ROLE)
             is_share_root = bool(item.data(0, self._IS_SHARE_ROLE))
             if path:
@@ -582,9 +636,141 @@ class NetworkPanel(QTreeWidget):
                 menu.addAction("Disconnect", lambda i=item: self._on_disconnect(i))
             menu.addSeparator()
             menu.addMenu(add_location_menu)
+            menu.addAction("Add Remote Control Target...", self._add_remote_control_target)
             menu.addAction("Refresh", self.refresh_shares)
 
         menu.exec(self.viewport().mapToGlobal(pos))
+
+    def _load_remote_control_targets(self) -> list[dict[str, str]]:
+        saved = self._settings.value(_REMOTE_CONTROL_TARGETS_KEY, [])
+        if isinstance(saved, str):
+            try:
+                saved = json.loads(saved)
+            except json.JSONDecodeError:
+                saved = []
+        if not isinstance(saved, list):
+            return []
+        targets: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for value in saved:
+            if not isinstance(value, dict):
+                continue
+            target = {
+                "name": str(value.get("name", "")).strip(),
+                "protocol": str(value.get("protocol", "vnc")).strip(),
+                "host": str(value.get("host", "")).strip(),
+                "port": str(value.get("port", "")).strip(),
+                "username": str(value.get("username", "")).strip(),
+            }
+            if not target["name"] or not target["host"]:
+                continue
+            identity = (target["name"].lower(), target["protocol"], target["host"].lower())
+            if identity in seen:
+                continue
+            seen.add(identity)
+            targets.append(target)
+        return targets
+
+    def _save_remote_control_targets(self) -> None:
+        self._settings.setValue(_REMOTE_CONTROL_TARGETS_KEY, json.dumps(self._remote_control_targets))
+
+    def _add_remote_control_target(self) -> None:
+        from .dialogs import RemoteControlTargetDialog
+
+        dialog = RemoteControlTargetDialog(parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        target = dialog.values()
+        self._remote_control_targets.append(target)
+        self._remote_control_targets.sort(key=lambda item: item["name"].lower())
+        self._save_remote_control_targets()
+        self.refresh_shares()
+
+    def _edit_remote_control_target(self, target: dict[str, str]) -> None:
+        from .dialogs import RemoteControlTargetDialog
+
+        dialog = RemoteControlTargetDialog(target, parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        updated = dialog.values()
+        for index, existing in enumerate(self._remote_control_targets):
+            if existing == target:
+                self._remote_control_targets[index] = updated
+                break
+        self._remote_control_targets.sort(key=lambda item: item["name"].lower())
+        self._save_remote_control_targets()
+        self.refresh_shares()
+
+    def _remove_remote_control_target(self, target: dict[str, str]) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Remove Remote Control Target",
+            f"Remove '{target['name']}' from saved remote control targets?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._remote_control_targets = [
+            existing for existing in self._remote_control_targets if existing != target
+        ]
+        self._save_remote_control_targets()
+        self.refresh_shares()
+
+    def _launch_remote_control_target(self, target: dict[str, str]) -> None:
+        protocol = target["protocol"]
+        host = target["host"]
+        port = target["port"]
+        username = target["username"]
+        address = f"{host}:{port}" if port else host
+
+        try:
+            if protocol == "screen_sharing" and os.name == "posix" and shutil.which("open"):
+                uri = f"vnc://{address}"
+                subprocess.Popen(["open", "-a", "Screen Sharing", uri])
+                return
+            if protocol == "vnc":
+                for executable in ("vncviewer", "vinagre", "remmina"):
+                    path = shutil.which(executable)
+                    if path:
+                        subprocess.Popen([path, address])
+                        return
+                if os.name == "posix" and shutil.which("open"):
+                    subprocess.Popen(["open", f"vnc://{address}"])
+                    return
+            if protocol == "rdp":
+                if os.name == "nt" and shutil.which("mstsc"):
+                    subprocess.Popen(["mstsc", f"/v:{address}"])
+                    return
+                for executable in ("xfreerdp", "xfreerdp3"):
+                    path = shutil.which(executable)
+                    if path:
+                        args = [path, f"/v:{address}"]
+                        if username:
+                            args.append(f"/u:{username}")
+                        subprocess.Popen(args)
+                        return
+                if os.name == "posix" and shutil.which("open"):
+                    subprocess.Popen(["open", f"rdp://{address}"])
+                    return
+            if protocol == "rustdesk":
+                rustdesk_id = "".join(host.split())
+                rustdesk = shutil.which("rustdesk")
+                if rustdesk:
+                    subprocess.Popen([rustdesk, "--connect", rustdesk_id])
+                    return
+                if os.name == "posix" and shutil.which("open"):
+                    subprocess.Popen(["open", f"rustdesk://connection/new/{rustdesk_id}"])
+                    return
+        except OSError as error:
+            QMessageBox.warning(self, "Remote Control", f"Could not launch {target['name']}: {error}")
+            return
+
+        QMessageBox.information(
+            self,
+            "Remote Control Client Not Found",
+            f"No supported client for '{target['name']}' was found on this system.",
+        )
 
     def _on_disconnect(self, item: QTreeWidgetItem) -> None:
         path = item.data(0, self._PATH_ROLE)

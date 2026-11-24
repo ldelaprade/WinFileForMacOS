@@ -66,6 +66,7 @@ python -m src.main
 - To browse a network share: right-click the **Network** node in the left panel → *Connect Network Share…* and enter a network path. Use SMB URL on macOS/Linux (e.g. `smb://server/share` or `smb://server/share/folder`) and UNC path on Windows (e.g. `\\server\share` or `\\server\share\folder`). Alternatively, type it directly in the address bar and press Enter. On macOS, login prompts may appear and the share then appears under *Network*.
 - Already-mounted shares (Windows/Samba/NFS/AFP) appear automatically under *Network* when the app starts.
 - Right-click a mounted share under *Network* to **Browse**, **Disconnect**, or connect another share.
+- Right-click the *Network* panel and choose **Add Remote Control Target...** to save a Mac Screen Sharing, VNC, Microsoft Remote Desktop, or RustDesk target. Saved machines appear under **Remote Control Targets** and can be launched, edited, or removed from their context menu.
 - Add a bookmark by dragging a folder from *File System* or *Network* into *Favorites*.
 - Right-click a folder in *File System* or *Network* and choose **Add to Favorites**.
 - On first launch, *Favorites* is pre-populated with Home, Desktop, and Downloads (if they exist).

@@ -994,6 +994,86 @@ class ActionConfirmDialog(QDialog):
         super().keyPressEvent(event)
 
 
+class RemoteControlTargetDialog(QDialog):
+    def __init__(
+        self,
+        target: dict[str, str] | None = None,
+        parent: QMainWindow | None = None,
+    ) -> None:
+        super().__init__(parent)
+        target = target or {}
+        self.setWindowTitle("Edit Remote Control Target" if target else "Add Remote Control Target")
+        self.resize(560, 260)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.name_edit = QLineEdit(self)
+        self.name_edit.setText(target.get("name", ""))
+        self.name_edit.setPlaceholderText("Office Mac")
+
+        self.protocol_combo = QComboBox(self)
+        protocols = (
+            ("screen_sharing", "Mac Screen Sharing"),
+            ("vnc", "VNC"),
+            ("rdp", "Microsoft Remote Desktop"),
+            ("rustdesk", "RustDesk"),
+        )
+        for protocol_id, label in protocols:
+            self.protocol_combo.addItem(label, protocol_id)
+        protocol_index = self.protocol_combo.findData(target.get("protocol", "screen_sharing"))
+        self.protocol_combo.setCurrentIndex(max(0, protocol_index))
+
+        self.host_edit = QLineEdit(self)
+        self.host_edit.setText(target.get("host", ""))
+        self.host_edit.setPlaceholderText("hostname or IP address")
+
+        self.port_edit = QLineEdit(self)
+        self.port_edit.setText(target.get("port", ""))
+        self.port_edit.setPlaceholderText("Optional")
+
+        self.username_edit = QLineEdit(self)
+        self.username_edit.setText(target.get("username", ""))
+        self.username_edit.setPlaceholderText("Optional")
+
+        form.addRow("Name:", self.name_edit)
+        form.addRow("Protocol:", self.protocol_combo)
+        self.host_label = QLabel("Host:", self)
+        form.addRow(self.host_label, self.host_edit)
+        form.addRow("Port:", self.port_edit)
+        form.addRow("Username:", self.username_edit)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.name_edit.textChanged.connect(self._update_validity)
+        self.host_edit.textChanged.connect(self._update_validity)
+        self.protocol_combo.currentIndexChanged.connect(self._update_host_label)
+        self._update_host_label()
+        self._update_validity()
+
+    def _update_host_label(self) -> None:
+        protocol = str(self.protocol_combo.currentData())
+        self.host_label.setText("RustDesc ID:" if protocol == "rustdesk" else "Host:")
+
+    def _update_validity(self) -> None:
+        self.ok_button.setEnabled(bool(self.name_edit.text().strip() and self.host_edit.text().strip()))
+
+    def values(self) -> dict[str, str]:
+        return {
+            "name": self.name_edit.text().strip(),
+            "protocol": str(self.protocol_combo.currentData()),
+            "host": self.host_edit.text().strip(),
+            "port": self.port_edit.text().strip(),
+            "username": self.username_edit.text().strip(),
+        }
+
+
 class WindowsShareDialog(QDialog):
     def __init__(self, parent: QMainWindow | None = None) -> None:
         super().__init__(parent)
