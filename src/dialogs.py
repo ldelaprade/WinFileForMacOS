@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 from .folder_archive import PACK_FORMATS, PackError, validate_destination
 
 if TYPE_CHECKING:
-    from .git_operations import GitBranchInfo, GitChanges
+    from .git_operations import GitBranchInfo, GitChanges, GitRestoreChanges
     from .svn_operations import SvnChanges
 
 
@@ -361,6 +361,84 @@ class GitStagingDialog(QDialog):
     def _uncheck_all(file_list: QListWidget) -> None:
         for row in range(file_list.count()):
             file_list.item(row).setCheckState(Qt.CheckState.Unchecked)
+
+
+class GitRestoreDialog(QDialog):
+    def __init__(self, changes: GitRestoreChanges, parent: QMainWindow | None = None) -> None:
+        super().__init__(parent)
+        self.changes = changes
+        self.setWindowTitle(f"Restore - {changes.branch}" if changes.branch else "Restore")
+        self.resize(760, 480)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(changes.root, self))
+        self.mode = QComboBox(self)
+        self.mode.addItem("Unstaged changes (restore from index)", "restore_worktree")
+        self.mode.addItem("Staged and unstaged changes (restore from HEAD)", "restore_head")
+        self.mode.model().item(1).setEnabled(changes.has_head)
+        layout.addWidget(self.mode)
+        message = (
+            "Untracked files are not restored. Unmerged files require restoring from HEAD. "
+            "Restoring from HEAD removes selected staged additions."
+        )
+        if not changes.has_head:
+            message += " Restore from HEAD is unavailable before the first commit."
+        explanation = QLabel(message, self)
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Check files to restore:", self))
+        controls.addStretch()
+        self.check_all_button = QPushButton("Check All", self)
+        self.uncheck_all_button = QPushButton("Uncheck All", self)
+        controls.addWidget(self.check_all_button)
+        controls.addWidget(self.uncheck_all_button)
+        layout.addLayout(controls)
+        self.file_list = QListWidget(self)
+        self.file_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        layout.addWidget(self.file_list)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        self.action_button = buttons.addButton("Restore", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.action_button.setAutoDefault(False)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.mode.currentIndexChanged.connect(self._populate)
+        self.file_list.itemChanged.connect(self._update_buttons)
+        self.check_all_button.clicked.connect(lambda: GitStagingDialog._check_all(self.file_list))
+        self.uncheck_all_button.clicked.connect(lambda: GitStagingDialog._uncheck_all(self.file_list))
+        self._populate()
+
+    def _populate(self) -> None:
+        self.file_list.clear()
+        entries = self.changes.worktree if self.operation() == "restore_worktree" else self.changes.head
+        for change in entries:
+            label = f"{change.original_path} -> {change.path}" if change.original_path else change.path
+            item = QListWidgetItem(label, self.file_list)
+            paths = [str(Path(self.changes.root) / change.path)]
+            if change.original_path:
+                paths.append(str(Path(self.changes.root) / change.original_path))
+            item.setData(Qt.ItemDataRole.UserRole, paths)
+            item.setToolTip(label)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+        self._update_buttons()
+
+    def operation(self) -> str:
+        return self.mode.currentData()
+
+    def selected_paths(self) -> list[str]:
+        paths = []
+        for row in range(self.file_list.count()):
+            item = self.file_list.item(row)
+            if item.checkState() == Qt.CheckState.Checked:
+                paths.extend(item.data(Qt.ItemDataRole.UserRole))
+        return list(dict.fromkeys(paths))
+
+    def _update_buttons(self) -> None:
+        states = [self.file_list.item(row).checkState() for row in range(self.file_list.count())]
+        self.action_button.setEnabled(any(state == Qt.CheckState.Checked for state in states))
+        self.check_all_button.setEnabled(any(state != Qt.CheckState.Checked for state in states))
+        self.uncheck_all_button.setEnabled(any(state == Qt.CheckState.Checked for state in states))
 
 
 class GitRepositoryStatusDialog(QDialog):

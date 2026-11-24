@@ -36,7 +36,7 @@ A classic Windows-inspired file manager for macOS, Windows, and Linux, built wit
 - Add **Recycle Bin** to Favorites to open the OS Trash/Recycle Bin and restore items
 - Favorites context menu can add the current folder, Desktop, Downloads, or Recycle Bin
 - Favorites can be re-ordered by drag-and-drop
-- Git context menu: repository cloning and status, stage/unstage selected items, staged diffs, commits, and repository initialization
+- Git context menu: repository cloning and status, stage/unstage and restore selected items, staged diffs, commits, and repository initialization
 - SVN context menu: working-copy status, diffs, add selected items, commit selected items, and update
 - Custom tools under **More...** in the right-pane context menu, with persistent name/command configuration
 - Windows subst drives appear under Local Machine and Drives with their target paths. Right-click a mapped drive and choose **Unsubst...** to remove it. Answering **Yes** to **Drop content as well?** permanently deletes the original target folder's contents before unmapping; **No** preserves them, and **Cancel** makes no changes.
@@ -103,6 +103,14 @@ the files to remove from staging, or use **Check All** to select every staged fi
 Unstaging preserves working files, including before the first commit. **View Staged
 Changes** shows the changes that **Commit Staged Changes** will commit; other
 working changes are not included.
+
+**Restore...** lists repository-wide changed files with checkboxes. Restore
+unstaged changes from the index while keeping staged changes, or restore both
+staged and unstaged changes from HEAD. The latter is unavailable before the
+first commit and removes selected staged additions. Unmerged files can only be
+restored from HEAD. Untracked and ignored files are not selected for restoration;
+Git restore is refused if they would be overwritten. Both modes require confirmation
+because discarded changes may not be recoverable.
 
 **Repository Status** shows local changes and the current branch. Switch between
 local branches, select a remote branch and create a tracking branch (the local

@@ -98,6 +98,7 @@ from .dialogs import (
     FtpShareDialog,
     GitCloneDialog,
     GitDiffDialog,
+    GitRestoreDialog,
     GitStagingDialog,
     SvnCheckoutDialog,
     SvnSelectionDialog,
@@ -156,7 +157,7 @@ from .git_overlays import GitOverlayController, git_repository_icon
 from .version import APP_VERSION
 
 if TYPE_CHECKING:
-    from .git_operations import GitChanges
+    from .git_operations import GitChanges, GitRestoreChanges
 
 
 class _ThumbnailWorkerSignals(QObject):
@@ -1510,6 +1511,7 @@ class ExplorerWindow(QMainWindow):
             ("Repository Status...", "status"),
             ("Staging...", "staging"),
             ("Unstaging...", "unstaging"),
+            ("Restore...", "restoring"),
             ("View Staged Changes...", "diff"),
             ("Commit Staged Changes...", "commit"),
         ):
@@ -1578,7 +1580,7 @@ class ExplorerWindow(QMainWindow):
         self.status.showMessage("Git operation in progress...")
         self._git_thread_pool.start(worker)
 
-    def _git_operation_finished(self, output: str | GitChanges, succeeded: bool) -> None:
+    def _git_operation_finished(self, output: str | GitChanges | GitRestoreChanges, succeeded: bool) -> None:
         action = self._git_worker.action if self._git_worker is not None else ""
         directory = self._git_worker.directory if self._git_worker is not None else None
         paths = self._git_worker.paths if self._git_worker is not None else []
@@ -1587,6 +1589,29 @@ class ExplorerWindow(QMainWindow):
         self._update_status()
         if not succeeded:
             QMessageBox.warning(self, "Git Operation Failed", str(output))
+            return
+        if action == "restoring":
+            from .git_operations import GitRestoreChanges
+
+            if not isinstance(output, GitRestoreChanges):
+                QMessageBox.warning(self, "Git Operation Failed", "Invalid restore changes returned.")
+                return
+            dialog = GitRestoreDialog(output, self)
+            if dialog.exec() == QDialog.Accepted:
+                selected = dialog.selected_paths()
+                operation = dialog.operation()
+                detail = (
+                    "Discard unstaged changes and restore the selected files from the index?"
+                    if operation == "restore_worktree" else
+                    "Discard staged and unstaged changes and restore the selected files from HEAD? "
+                    "Selected staged additions will be deleted."
+                )
+                if selected and QMessageBox.question(
+                    self, "Confirm Git Restore", detail + "\n\nThis cannot be undone by Git.",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                ) == QMessageBox.Yes:
+                    self._start_git_operation(operation, output.root, selected)
+            dialog.deleteLater()
             return
         if action in {"staging", "unstaging"}:
             from .git_operations import GitChanges

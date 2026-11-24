@@ -29,6 +29,16 @@ class GitChanges:
 
 
 @dataclass(frozen=True)
+class GitRestoreChanges:
+    root: str
+    worktree: list[GitChange]
+    head: list[GitChange]
+    untracked: list[str]
+    has_head: bool
+    branch: str | None = None
+
+
+@dataclass(frozen=True)
 class GitBranchInfo:
     current: str | None
     local: list[str]
@@ -72,7 +82,7 @@ class GitOperations:
 
     def run(
         self, action: str, paths: list[str] | None = None, message: str = ""
-    ) -> str | GitChanges:
+    ) -> str | GitChanges | GitRestoreChanges:
         try:
             if action == "clone":
                 if not paths or len(paths) != 2:
@@ -91,13 +101,38 @@ class GitOperations:
                 if repository.bare or repository.working_tree_dir is None:
                     raise GitOperationError("A working-tree repository is required.")
                 selected = self._relative_paths(repository.working_tree_dir, paths or []) if action in {
-                    "stage", "unstage", "diff", "file_diff"
+                    "stage", "unstage", "diff", "file_diff", "restore_worktree", "restore_head"
                 } else []
                 with repository.git.custom_environment(
                     GIT_LITERAL_PATHSPECS="1", GIT_TERMINAL_PROMPT="0"
                 ):
                     if action in {"staging", "unstaging"}:
                         return self._changes(repository)
+                    if action == "restoring":
+                        return self._restore_changes(repository)
+                    if action in {"restore_worktree", "restore_head"}:
+                        if not selected:
+                            raise GitOperationError("Select files to restore first.")
+                        changes = self._restore_changes(repository)
+                        if action == "restore_head" and not changes.has_head:
+                            raise GitOperationError("There is no commit to restore from yet.")
+                        entries = changes.worktree if action == "restore_worktree" else changes.head
+                        allowed = {name for entry in entries for name in (entry.path, entry.original_path) if name}
+                        if not set(selected).issubset(allowed):
+                            raise GitOperationError("The selected changes have changed; reopen Restore and try again.")
+                        for path in selected:
+                            if any(
+                                path == name or path.startswith(name + "/") or name.startswith(path + "/")
+                                for name in changes.untracked
+                            ):
+                                raise GitOperationError(
+                                    f"Cannot restore '{path}' because it would affect untracked files."
+                                )
+                        options = ["--worktree"] if action == "restore_worktree" else [
+                            "--source=HEAD", "--staged", "--worktree"
+                        ]
+                        repository.git.restore(*options, "--", *selected, **self._timeout_options(30))
+                        return f"Restored {len(selected)} selected path(s)."
                     if action == "status":
                         return repository.git.status(untracked_files="all", **self._timeout_options(30))
                     if action in {"push", "pull", "fetch"}:
@@ -324,6 +359,32 @@ class GitOperations:
                 modified.append(GitChange(path, original_path if worktree_status in {"R", "C"} else None))
         branch = None if repository.head.is_detached else repository.active_branch.name
         return GitChanges(repository.working_tree_dir, modified, untracked, staged, branch)
+
+    @staticmethod
+    def _restore_changes(repository: Repo) -> GitRestoreChanges:
+        records = iter(repository.git.status(
+            "--porcelain=v1", "-z", "--ignored=matching",
+            untracked_files="all", **GitOperations._timeout_options(30)
+        ).split("\0"))
+        worktree: list[GitChange] = []
+        head: list[GitChange] = []
+        untracked: list[str] = []
+        for record in records:
+            if not record:
+                continue
+            flags, path = record[:2], record[3:]
+            original = next(records) if "R" in flags or "C" in flags else None
+            if flags in {"??", "!!"}:
+                untracked.append(path.rstrip("/"))
+                continue
+            conflicted = flags in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+            if not conflicted and flags[1] not in {" ", "?", "!"}:
+                worktree.append(GitChange(path, original if flags[1] in {"R", "C"} else None))
+            head.append(GitChange(path, original))
+        branch = None if repository.head.is_detached else repository.active_branch.name
+        return GitRestoreChanges(
+            repository.working_tree_dir, worktree, head, untracked, repository.head.is_valid(), branch
+        )
 
     @staticmethod
     def _relative_paths(root: str, paths: list[str]) -> list[str]:

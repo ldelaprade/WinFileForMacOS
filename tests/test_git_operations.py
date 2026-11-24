@@ -304,6 +304,98 @@ class GitOperationsTests(unittest.TestCase):
         self.assertEqual(self.operations.run("diff"), "No staged changes.")
         self.assertTrue(Path(renamed).exists())
 
+    def test_restore_modes_preserve_other_files_and_handle_staged_additions(self):
+        path = self.write_file("[tracked].txt", "committed\n")
+        deleted = self.write_file("deleted.txt", "deleted\n")
+        self.operations.run("stage", [path, deleted])
+        self.operations.run("commit", message="Initial files")
+        Path(path).write_text("staged\n")
+        self.operations.run("stage", [path])
+        Path(path).write_text("unstaged\n")
+        Path(deleted).unlink()
+        added = self.write_file("added.txt")
+        self.operations.run("stage", [added])
+        untracked = self.write_file("untracked.txt")
+
+        changes = self.operations.run("restoring")
+        self.assertEqual({entry.path for entry in changes.worktree}, {"[tracked].txt", "deleted.txt"})
+        self.assertEqual({entry.path for entry in changes.head}, {"[tracked].txt", "deleted.txt", "added.txt"})
+        self.operations.run("restore_worktree", [path, deleted])
+        self.assertEqual(Path(path).read_text(), "staged\n")
+        self.assertEqual(Path(deleted).read_text(), "deleted\n")
+        self.assertIn("+staged", self.operations.run("diff"))
+        self.operations.run("restore_head", [path, added])
+        self.assertEqual(Path(path).read_text(), "committed\n")
+        self.assertFalse(Path(added).exists())
+        self.assertTrue(Path(untracked).exists())
+        self.assertEqual(self.operations.run("diff"), "No staged changes.")
+
+    def test_restore_rename_and_untracked_collision(self):
+        original = self.write_file("old.txt", "original\n")
+        self.operations.run("stage", [original])
+        self.operations.run("commit", message="Initial file")
+        renamed = str(self.root / "new.txt")
+        Path(original).rename(renamed)
+        self.operations.run("stage", [original, renamed])
+        changes = self.operations.run("restoring")
+        self.assertEqual([(entry.path, entry.original_path) for entry in changes.head], [("new.txt", "old.txt")])
+        self.write_file("old.txt", "untracked replacement\n")
+        with self.assertRaisesRegex(GitOperationError, "untracked"):
+            self.operations.run("restore_head", [renamed, original])
+        self.assertEqual(Path(original).read_text(), "untracked replacement\n")
+        self.assertTrue(Path(renamed).exists())
+        Path(original).unlink()
+        self.operations.run("restore_head", [renamed, original])
+        self.assertEqual(Path(original).read_text(), "original\n")
+        self.assertFalse(Path(renamed).exists())
+
+    def test_restore_before_first_commit_and_invalid_selections(self):
+        path = self.write_file("new.txt", "staged\n")
+        self.operations.run("stage", [path])
+        Path(path).write_text("unstaged\n")
+        self.assertFalse(self.operations.run("restoring").has_head)
+        with self.assertRaisesRegex(GitOperationError, "no commit"):
+            self.operations.run("restore_head", [path])
+        self.operations.run("restore_worktree", [path])
+        self.assertEqual(Path(path).read_text(), "staged\n")
+        for paths in ([], [path], [self.write_file("untracked.txt")], [str(self.root)]):
+            with self.subTest(paths=paths), self.assertRaises(GitOperationError):
+                self.operations.run("restore_worktree", paths)
+
+    def test_restore_conflict_from_head_only(self):
+        path = self.write_file("conflict.txt", "base\n")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Base")
+        branch = self.repository.active_branch.name
+        self.operations.run("create_branch", ["other"])
+        Path(path).write_text("other\n")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Other")
+        self.operations.run("switch", [branch])
+        Path(path).write_text("current\n")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Current")
+        self.repository.git.merge("other", with_exceptions=False)
+        changes = self.operations.run("restoring")
+        self.assertEqual(changes.worktree, [])
+        self.assertEqual([entry.path for entry in changes.head], ["conflict.txt"])
+        self.operations.run("restore_head", [path])
+        self.assertEqual(Path(path).read_text(), "current\n")
+        self.assertFalse(self.repository.index.unmerged_blobs())
+
+    def test_restore_does_not_overwrite_ignored_replacement(self):
+        path = self.write_file("tracked.txt")
+        self.operations.run("stage", [path])
+        self.operations.run("commit", message="Initial file")
+        Path(path).unlink()
+        self.operations.run("stage", [path])
+        rules = self.write_file(".gitignore", "tracked.txt\n")
+        self.operations.run("stage", [rules])
+        self.write_file("tracked.txt", "ignored replacement\n")
+        with self.assertRaisesRegex(GitOperationError, "untracked"):
+            self.operations.run("restore_head", [path])
+        self.assertEqual(Path(path).read_text(), "ignored replacement\n")
+
     def test_stage_and_unstage_before_first_commit_preserves_file(self):
         path = self.write_file("new file.txt")
         self.operations.run("stage", [path])
@@ -486,18 +578,19 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         with patch.object(self.window, "selected_paths", return_value=[]):
             self.window._add_git_menu(menu)
         actions = menu.actions()[0].menu().actions()
-        self.assertEqual([action.text() for action in actions[:5]], [
+        self.assertEqual([action.text() for action in actions[:6]], [
             "Repository Status...", "Staging...", "Unstaging...",
+            "Restore...",
             "View Staged Changes...", "Commit Staged Changes...",
         ])
-        self.assertEqual(actions[5].text(), "More")
+        self.assertEqual(actions[6].text(), "More")
         self.assertEqual(
-            [action.text() for action in actions[5].menu().actions()],
+            [action.text() for action in actions[6].menu().actions()],
             ["Clone Repository...", "Initialize Repository Here..."],
         )
         self.assertTrue(actions[1].isEnabled())
         self.assertTrue(actions[2].isEnabled())
-        self.assertTrue(actions[5].isEnabled())
+        self.assertTrue(actions[6].isEnabled())
 
     def test_modified_file_contextual_git_menu_offers_file_diff(self):
         from PySide6.QtWidgets import QMenu
@@ -684,7 +777,7 @@ class GitExplorerIntegrationTests(unittest.TestCase):
         menu = QMenu(self.window)
         with patch.object(self.window, "current_path", return_value=self.temporary.name):
             self.window._add_git_menu(menu)
-        more_menu = menu.actions()[0].menu().actions()[5].menu()
+        more_menu = menu.actions()[0].menu().actions()[6].menu()
         clone_action = more_menu.actions()[0]
         destination = str(Path(self.temporary.name) / "repo")
         with patch.object(GitCloneDialog, "exec", return_value=QDialog.DialogCode.Accepted), patch.object(
@@ -711,6 +804,51 @@ class GitExplorerIntegrationTests(unittest.TestCase):
             self.window._git_operation_finished("Clone complete", True)
         navigate.assert_called_once_with(destination, record_history=True)
         output.assert_called_once_with("Clone complete")
+
+    def test_restore_dialog_modes_selection_and_confirmation(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDialog, QMessageBox, QMenu
+        from src.dialogs import GitRestoreDialog
+        from src.file_explorer import _GitWorker
+        from src.git_operations import GitChange, GitRestoreChanges
+
+        changes = GitRestoreChanges(
+            self.temporary.name, [GitChange("work.txt")],
+            [GitChange("new.txt", "old.txt")], [], True,
+        )
+        menu = QMenu(self.window)
+        with patch.object(self.window, "_start_git_operation") as start:
+            self.window._add_git_menu(menu)
+            next(action for action in menu.actions()[0].menu().actions()
+                 if action.text() == "Restore...").trigger()
+            start.assert_called_once_with("restoring", self.window.current_path(), [])
+
+        def accept_selection(dialog):
+            self.assertFalse(dialog.action_button.isEnabled())
+            dialog.check_all_button.click()
+            self.assertEqual(dialog.selected_paths(), [str(Path(changes.root) / "work.txt")])
+            dialog.mode.setCurrentIndex(1)
+            self.assertFalse(dialog.action_button.isEnabled())
+            dialog.file_list.item(0).setCheckState(Qt.CheckState.Checked)
+            return QDialog.Accepted
+
+        for answer in (QMessageBox.No, QMessageBox.Yes):
+            self.window._git_worker = _GitWorker(self.temporary.name, "restoring", [], "")
+            with patch.object(GitRestoreDialog, "exec", accept_selection), patch(
+                "src.file_explorer.QMessageBox.question", return_value=answer
+            ), patch.object(self.window, "_start_git_operation") as start:
+                self.window._git_operation_finished(changes, True)
+                if answer == QMessageBox.No:
+                    start.assert_not_called()
+                else:
+                    start.assert_called_once_with("restore_head", changes.root, [
+                        str(Path(changes.root) / "new.txt"), str(Path(changes.root) / "old.txt")
+                    ])
+
+        no_head = GitRestoreDialog(GitRestoreChanges(self.temporary.name, [], [], [], False), self.window)
+        self.addCleanup(no_head.close)
+        self.assertFalse(no_head.mode.model().item(1).isEnabled())
+        self.assertFalse(no_head.action_button.isEnabled())
 
     def test_staging_dialog_separates_sections_and_stages_only_checked_files(self):
         from PySide6.QtCore import Qt
