@@ -1,4 +1,8 @@
-PySide6>=6.6,<6.8
+# The 6.6-6.7 range is retained for Linux builds for compatibility with older CPUs.
+# macOS and Windows may use newer PySide6 releases, including with Python 3.14.
+PySide6>=6.10.1; sys_platform == "darwin"
+PySide6>=6.10.1; sys_platform == "win32"
+PySide6>=6.6,<6.8; sys_platform == "linux"
 pyftpdlib>=2.0
 GitPython>=3.1.44,<4
 Send2Trash>=1.8.2
