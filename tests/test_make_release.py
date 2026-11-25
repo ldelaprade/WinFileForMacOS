@@ -2,6 +2,7 @@ import os
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import venv
@@ -14,6 +15,29 @@ from tools import publish_release
 
 @unittest.skipIf(shutil.which("make") is None, "Requires make")
 class WindowsReleaseBuildTests(unittest.TestCase):
+    def test_help_lists_described_targets_once_from_all_makefiles(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            (Path(temporary) / "extra.mk").write_text(
+                "build: ## Duplicate build description\n"
+                "extra-target: ## Extra target description\n"
+                "undocumented:\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["make", "--no-print-directory", "-f", str(root / "Makefile"),
+                 "-f", "extra.mk", "HOST_OS=Darwin", f"PYTHON={sys.executable}", "help"],
+                cwd=temporary, capture_output=True, text=True, timeout=30,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], "Available targets:")
+        self.assertIn("  help                     List available targets and their descriptions", lines)
+        self.assertIn("  extra-target             Extra target description", lines)
+        self.assertEqual(sum(line.startswith("  build ") for line in lines), 1)
+        self.assertNotIn("Duplicate build description", result.stdout)
+        self.assertNotIn("undocumented", result.stdout)
+
     @unittest.skipUnless(os.name == "nt", "Requires Windows")
     def test_windows_prefers_virtual_environment_python(self):
         root = Path(__file__).resolve().parents[1]

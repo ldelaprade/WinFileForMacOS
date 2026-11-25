@@ -41,7 +41,7 @@ BUNDLE_ID     ?= com.yourname.explorer
 .PHONY: help all build unsigned-dmg build-debug trace-debug release velo-upload velo-publish release-macos-dmg dmg notarize staple build-linux build-deb build-windows build-windows-installer clean clean-all run
 
 help: ## List available targets and their descriptions
-	@awk 'BEGIN { print "Available targets:" } /^[a-zA-Z0-9_.-]+:[^#]*##/ { target=$$1; sub(/:.*/, "", target); if (!seen[target]++) { sub(/^[^#]*##[[:space:]]*/, "", $$0); printf "  %-24s %s\n", target, $$0 } }' $(MAKEFILE_LIST)
+	@$(PYTHON) "$(dir $(abspath $(firstword $(MAKEFILE_LIST))))tools/make_help.py" $(foreach file,$(MAKEFILE_LIST),"$(file)")
 
 all: build ## Build the application for the current platform
 
