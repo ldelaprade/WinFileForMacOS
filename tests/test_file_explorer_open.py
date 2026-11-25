@@ -1,4 +1,5 @@
 import os
+import errno
 import json
 import subprocess
 import tempfile
@@ -758,6 +759,52 @@ class FileExplorerOpenTests(unittest.TestCase):
 
             popen.assert_not_called()
             self.assertEqual(open_url.call_args.args[0].toLocalFile(), str(document))
+
+    @unittest.skipIf(os.name == "nt", "POSIX execute permissions are required")
+    def test_open_executable_format_error_uses_file_association(self):
+        with tempfile.TemporaryDirectory() as directory:
+            movie = Path(directory) / "movie.AVI"
+            movie.write_bytes(b"not an executable")
+            movie.chmod(0o755)
+            with patch("src.file_explorer.QDesktopServices.openUrl", return_value=True) as open_url, \
+                    patch("src.file_explorer.QMessageBox.critical") as error:
+                ExplorerWindow._open_file(object(), str(movie))
+            self.assertEqual(open_url.call_args.args[0].toLocalFile(), str(movie))
+            error.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX execute permissions are required")
+    def test_open_other_launch_errors_are_not_hidden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "tool"
+            executable.write_text("test")
+            executable.chmod(0o755)
+            with patch("src.file_explorer.subprocess.Popen", side_effect=OSError(errno.EACCES, "denied")), \
+                    patch("src.file_explorer.QDesktopServices.openUrl") as open_url, \
+                    patch("src.file_explorer.QMessageBox.critical") as error:
+                ExplorerWindow._open_file(object(), str(executable))
+            open_url.assert_not_called()
+            error.assert_called_once()
+
+    @unittest.skipIf(os.name == "nt", "POSIX execute permissions are required")
+    def test_open_format_fallback_reports_failed_association(self):
+        with tempfile.TemporaryDirectory() as directory:
+            movie = Path(directory) / "movie.AVI"
+            movie.write_bytes(b"not an executable")
+            movie.chmod(0o755)
+            with patch("src.file_explorer.QDesktopServices.openUrl", return_value=False), \
+                    patch("src.file_explorer.QMessageBox.critical") as error:
+                ExplorerWindow._open_file(object(), str(movie))
+            error.assert_called_once()
+
+    def test_copy_file_path_copies_text_and_clears_file_clipboard(self):
+        window = MagicMock()
+        window._clipboard_paths = ["/old"]
+        window._clipboard_mode = "cut"
+        with patch("src.file_explorer.QApplication.clipboard") as clipboard:
+            ExplorerWindow._copy_file_path(window, "/folder/file name.avi")
+        clipboard.return_value.setText.assert_called_once_with("/folder/file name.avi")
+        self.assertEqual(window._clipboard_paths, [])
+        self.assertIsNone(window._clipboard_mode)
 
     def test_windows_user_folder_path_reads_registry_value(self):
         import sys

@@ -36,6 +36,11 @@ A classic Windows-inspired file manager for macOS, Windows, and Linux, built wit
 - Add **Recycle Bin** to Favorites to open the OS Trash/Recycle Bin and restore items
 - Favorites context menu can add the current folder, Desktop, Downloads, or Recycle Bin
 - Favorites can be re-ordered by drag-and-drop
+- Right-click a folder in Favorites or Local Machine and choose **Search Files...**
+  to search its subfolders. Names are case-insensitive; use `*` and `?` wildcards,
+  or enter part of a name. Double-click a result to open it, or select one and
+  choose **Open Containing Folder**. Symbolic-link folders are not traversed.
+- Right-click an item in the right pane and choose **Copy file path** to copy its path as text.
 - Git context menu: repository cloning and status, stage/unstage and restore selected items, staged diffs, commits, and repository initialization
 - SVN context menu: working-copy status, diffs, add selected items, commit selected items, and update
 - Custom tools under **More...** in the right-pane context menu, with persistent name/command configuration

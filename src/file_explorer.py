@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import json
 import shlex
@@ -138,6 +139,7 @@ from .file_operations import (
     paste_items,
     rename_item,
 )
+from .file_search import FileSearchDialog
 from .airs_vfs import (
     DriveError,
     VfsError,
@@ -1349,6 +1351,7 @@ class ExplorerWindow(QMainWindow):
         if clicked_target is not None:
             menu.addSeparator()
             menu.addAction("Copy", lambda path=clicked_target: self._copy_paths([path]))
+            menu.addAction("Copy file path", lambda path=clicked_target: self._copy_file_path(path))
             menu.addAction("Cut", lambda path=clicked_target: self._cut_paths([path]))
         if os.path.isdir(target):
             menu.addAction("Paste", lambda destination=target: self.paste_into_current(destination))
@@ -1855,6 +1858,8 @@ class ExplorerWindow(QMainWindow):
                 menu.addSeparator()
                 menu.addAction("Open", lambda current_path=path: self._open_favorite(current_path))
                 menu.addAction("Remove from favorites", lambda current_path=path: self._remove_favorite_path(current_path))
+                if path != self._SYSTEM_TRASH_FAVORITE:
+                    menu.addAction("Search Files...", lambda current_path=path: self._search_files(current_path))
                 menu.addSeparator()
                 if path in self._ftp_shares:
                     menu.addAction("Stop FTP Share", lambda current_path=path: self._stop_ftp_share(current_path))
@@ -1945,12 +1950,22 @@ class ExplorerWindow(QMainWindow):
         if isinstance(path, str) and path:
             menu.addAction("Browse", lambda target_path=path: self.navigate_to(target_path, record_history=True))
             menu.addAction("Add to Favorites", lambda target_path=path: self._add_favorite_with_feedback(target_path))
+            menu.addAction("Search Files...", lambda target_path=path: self._search_files(target_path))
             self._add_unsubst_action(menu, path)
             self._add_unmount_drive_action(menu, path)
             self._add_pack_folder_action(menu, path)
             menu.addSeparator()
         self._add_show_hidden_action(menu)
         menu.exec(self.this_pc_view.viewport().mapToGlobal(pos))
+
+    def _search_files(self, path: str) -> None:
+        if not os.path.isdir(path):
+            QMessageBox.warning(self, "Search Files", f"Folder not found or unavailable:\n{path}")
+            return
+        FileSearchDialog(
+            path, self, self._open_file,
+            lambda folder: self.navigate_to(folder, record_history=True),
+        ).exec()
 
     def _add_unmount_drive_action(self, menu: QMenu, path: str) -> None:
         if (DriveReportWidget.is_removable_windows_volume(path)
@@ -3153,7 +3168,11 @@ class ExplorerWindow(QMainWindow):
                     [path], cwd=os.path.dirname(path) or None, env=launch_environment
                 )
             except OSError as error:
-                QMessageBox.critical(self, "Open failed", str(error))
+                if error.errno == errno.ENOEXEC:
+                    if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+                        QMessageBox.critical(self, "Open failed", f"Could not open:\n{path}")
+                else:
+                    QMessageBox.critical(self, "Open failed", str(error))
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
@@ -3253,6 +3272,12 @@ class ExplorerWindow(QMainWindow):
 
     def copy_selected(self) -> None:
         self._copy_paths(self.selected_paths())
+
+    def _copy_file_path(self, path: str) -> None:
+        self._clipboard_paths = []
+        self._clipboard_mode = None
+        QApplication.clipboard().setText(path)
+        self.status.showMessage("Copied file path", 2500)
 
     def _copy_paths(self, paths: list[str]) -> None:
         if not paths:
