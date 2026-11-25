@@ -44,7 +44,7 @@ def git(*args, check=True):
     return result
 
 
-def verify_publish_prerequisites(tag):
+def verify_publish_prerequisites():
     branch = git("branch", "--show-current").stdout.strip()
     if branch != "main":
         raise RuntimeError(f"velo-publish must run on main, not {branch or 'a detached HEAD'}.")
@@ -53,13 +53,32 @@ def verify_publish_prerequisites(tag):
     if not remote.startswith("git@github.com:"):
         raise RuntimeError("origin must use the passwordless SSH GitHub remote.")
 
-    local_tag = git("rev-parse", "--verify", f"refs/tags/{tag}", check=False)
-    if local_tag.returncode:
-        raise RuntimeError(f"Local Git tag {tag} does not exist.")
 
-    remote_tag = git("ls-remote", "--exit-code", "--tags", "origin", f"refs/tags/{tag}", check=False)
-    if remote_tag.returncode:
-        raise RuntimeError(f"Git tag {tag} has not been pushed to origin.")
+def ensure_release_tag(tag):
+    ref = f"refs/tags/{tag}"
+    remote_output = git("ls-remote", "--tags", "origin", ref).stdout.strip()
+    remote_hash = remote_output.split()[0] if remote_output else None
+    local_tag = git("show-ref", "--verify", "--quiet", ref, check=False)
+    if local_tag.returncode not in (0, 1):
+        raise RuntimeError(local_tag.stderr.strip() or f"Could not check local Git tag {tag}.")
+
+    if local_tag.returncode == 1:
+        if remote_hash:
+            git("fetch", "--no-tags", "origin", f"{ref}:{ref}")
+            print(f"Fetched existing Git tag {tag} from origin.")
+        else:
+            if git("status", "--porcelain", "--untracked-files=normal").stdout.strip():
+                raise RuntimeError("Commit or remove uncommitted changes before creating a release tag.")
+            git("tag", "-a", tag, "-m", f"Release {tag}")
+            print(f"Created Git tag {tag} at the current commit.")
+
+    local_hash = git("rev-parse", "--verify", ref).stdout.strip()
+    if remote_hash:
+        if local_hash != remote_hash:
+            raise RuntimeError(f"Local and remote Git tag {tag} differ; neither tag was overwritten.")
+    else:
+        git("push", "origin", f"{ref}:{ref}")
+        print(f"Pushed Git tag {tag} to origin.")
 
 
 def write_update_policy(tag):
@@ -129,8 +148,9 @@ def main():
 
     try:
         tag = version_tag()
-        verify_publish_prerequisites(tag)
+        verify_publish_prerequisites()
         token = resolve_token()
+        ensure_release_tag(tag)
         write_update_policy(tag)
         release = publish_github_release(tag, token)
         print(f"Published {tag}: {release['html_url']}")

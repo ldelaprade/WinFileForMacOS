@@ -224,6 +224,95 @@ class PublishReleaseTests(unittest.TestCase):
                 "tag": "v3.1.0",
             })
 
+    def test_missing_token_does_not_create_or_push_tag(self):
+        with mock.patch.object(sys, "argv", ["publish_release.py", "--confirm"]), \
+             mock.patch.object(publish_release, "verify_publish_prerequisites"), \
+             mock.patch.object(publish_release, "resolve_token", side_effect=RuntimeError("Missing token")), \
+             mock.patch.object(publish_release, "ensure_release_tag") as ensure_tag, \
+             mock.patch("sys.stderr"):
+            self.assertEqual(publish_release.main(), 1)
+        ensure_tag.assert_not_called()
+
+
+class PublishReleaseTagTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.repository = root / "repository"
+        self.remote = root / "remote.git"
+        self.run_git(root, "init", "--bare", str(self.remote))
+        self.run_git(root, "init", "-b", "main", str(self.repository))
+        self.run_git(self.repository, "config", "user.name", "Test User")
+        self.run_git(self.repository, "config", "user.email", "test@example.com")
+        self.run_git(self.repository, "remote", "add", "origin", str(self.remote))
+        (self.repository / "app.txt").write_text("first\n", encoding="utf-8")
+        self.run_git(self.repository, "add", "app.txt")
+        self.run_git(self.repository, "commit", "-m", "Initial commit")
+        patch = mock.patch.object(publish_release, "ROOT", self.repository)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def run_git(self, cwd, *args):
+        repository = ["--git-dir", str(self.remote)] if cwd == self.remote else []
+        return subprocess.run(
+            ["git", *repository, *args], cwd=cwd, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    def test_creates_and_pushes_annotated_tag_and_reuses_it(self):
+        publish_release.ensure_release_tag("v1.0.0")
+        local = self.run_git(self.repository, "rev-parse", "refs/tags/v1.0.0")
+        remote = self.run_git(self.remote, "rev-parse", "refs/tags/v1.0.0")
+        self.assertEqual(local, remote)
+        self.assertEqual(self.run_git(self.repository, "cat-file", "-t", local), "tag")
+        self.assertEqual(
+            self.run_git(self.repository, "rev-parse", "v1.0.0^{}"),
+            self.run_git(self.repository, "rev-parse", "HEAD"),
+        )
+        publish_release.ensure_release_tag("v1.0.0")
+        self.assertEqual(self.run_git(self.remote, "rev-parse", "refs/tags/v1.0.0"), remote)
+
+    def test_fetches_remote_tag_if_missing_locally(self):
+        publish_release.ensure_release_tag("v1.0.0")
+        self.run_git(self.repository, "tag", "-d", "v1.0.0")
+        publish_release.ensure_release_tag("v1.0.0")
+        self.assertEqual(
+            self.run_git(self.repository, "rev-parse", "refs/tags/v1.0.0"),
+            self.run_git(self.remote, "rev-parse", "refs/tags/v1.0.0"),
+        )
+
+    def test_existing_unpushed_tag_is_pushed(self):
+        self.run_git(self.repository, "tag", "-a", "v1.0.0", "-m", "Existing release")
+        publish_release.ensure_release_tag("v1.0.0")
+        self.assertEqual(
+            self.run_git(self.repository, "rev-parse", "refs/tags/v1.0.0"),
+            self.run_git(self.remote, "rev-parse", "refs/tags/v1.0.0"),
+        )
+
+    def test_rejects_conflicting_tags_without_overwriting(self):
+        publish_release.ensure_release_tag("v1.0.0")
+        remote = self.run_git(self.remote, "rev-parse", "refs/tags/v1.0.0")
+        self.run_git(self.repository, "tag", "-d", "v1.0.0")
+        self.run_git(self.repository, "tag", "v1.0.0")
+        local = self.run_git(self.repository, "rev-parse", "refs/tags/v1.0.0")
+        with self.assertRaisesRegex(RuntimeError, "differ"):
+            publish_release.ensure_release_tag("v1.0.0")
+        self.assertEqual(self.run_git(self.repository, "rev-parse", "refs/tags/v1.0.0"), local)
+        self.assertEqual(self.run_git(self.remote, "rev-parse", "refs/tags/v1.0.0"), remote)
+
+    def test_refuses_to_tag_uncommitted_changes(self):
+        (self.repository / "app.txt").write_text("changed\n", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "uncommitted changes"):
+            publish_release.ensure_release_tag("v1.0.0")
+        self.assertEqual(self.run_git(self.repository, "tag", "--list"), "")
+        self.assertEqual(self.run_git(self.remote, "tag", "--list"), "")
+
+    def test_unreachable_remote_does_not_create_tag(self):
+        self.run_git(self.repository, "remote", "set-url", "origin", str(self.repository / "missing.git"))
+        with self.assertRaises(RuntimeError):
+            publish_release.ensure_release_tag("v1.0.0")
+        self.assertEqual(self.run_git(self.repository, "tag", "--list"), "")
+
 
 @unittest.skipIf(os.name == "nt" or shutil.which("make") is None, "Requires POSIX make")
 class MakeReleaseTests(unittest.TestCase):

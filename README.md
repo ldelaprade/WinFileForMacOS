@@ -356,9 +356,12 @@ After every platform upload is complete, run:
 make velo-publish
 ```
 
-The publish target verifies that `main` uses the SSH origin, the `v<APP_VERSION>`
-tag exists locally and remotely, and the GitHub credential is available. It
-commits and pushes only `updates.json`, then assigns the matching tag and
+The publish target verifies that `main` uses the SSH origin and the GitHub
+credential is available. It creates an annotated `v<APP_VERSION>` tag at the
+current commit and pushes it if needed; creating a new tag requires a clean
+working tree. An existing remote tag is fetched if missing locally, and
+conflicting tags are never overwritten. It commits and pushes only `updates.json`,
+then assigns the matching tag and
 publishes the existing draft release. This target deliberately requires
 `--confirm` internally so it cannot run accidentally from a dry run or typo.
 
